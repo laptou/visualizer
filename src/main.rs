@@ -2,12 +2,10 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use std::sync::{Arc, Mutex};
 use std::thread;
-
-mod audio;
-mod cli;
-mod gfx;
-mod shared;
-mod ui;
+use visualizer::audio;
+use visualizer::cli;
+use visualizer::shared;
+use visualizer::ui;
 
 fn main() -> Result<()> {
     // initialize tracing subscriber for logging

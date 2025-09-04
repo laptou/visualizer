@@ -20,3 +20,11 @@ lyon_path = "1"
 lyon_geom = "1"
 cosmic-text = "0.14"
 glyphon = "0.9.0"
+
+[lib]
+name = "visualizer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "visualizer-app"
+path = "src/main.rs"
