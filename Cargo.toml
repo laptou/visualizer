@@ -1,0 +1,10 @@
+[package]
+name = "visualizer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aus = "0.1.8"
+cpal = "0.16.0"
+rustfft = "6.2.0"
+clap = { version = "4.4", features = ["derive"] }
