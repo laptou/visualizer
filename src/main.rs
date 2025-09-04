@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 /// configuration constants for audio processing
 const BUFFER_SIZE: usize = 1024; // fft window size
@@ -19,7 +19,6 @@ const BPM_SMOOTHING_WINDOW: usize = 21; // median smoothing window for bpm
 const BPM_EMA_ALPHA: f32 = 0.1; // additional EMA smoothing factor
 const BPM_MIN: f32 = 80.0; // preferred bpm lower bound for folding
 const BPM_MAX: f32 = 160.0; // preferred bpm upper bound for folding
-const BPM_MAX_STEP_PER_UPDATE: f32 = 5.0; // limit change per update
 const BPM_MIN_CONFIDENCE_RATIO: f32 = 1.8; // min peak/median ratio to accept bpm update
 
 // frequency weighting for onset detection
@@ -123,6 +122,15 @@ impl AudioProcessor {
             } else {
                 info!("current bpm: n/a (analyzing...)");
             }
+            // trace summary once per second to limit spam
+            trace!(
+                "diag: avg_rms={:.6}, onset_frames={}, bpm_history={}, hop={}, sr={}",
+                avg_rms,
+                self.onset_history.len(),
+                self.bpm_history.len(),
+                self.hop_size,
+                self.sample_rate
+            );
             self.last_bpm_print = Instant::now();
         }
     }
@@ -213,6 +221,28 @@ impl AudioProcessor {
             })
             .collect();
 
+        // compute simple band energies to diagnose dominance of hats vs kick
+        // bands: low [0, LOW_EMPH_FC), mid [LOW_EMPH_FC, HIGH_ALLOW_FC), high [HIGH_ALLOW_FC, nyquist)
+        let low_idx_end = (LOW_EMPH_FC / bin_hz).floor().max(0.0) as usize;
+        let high_idx_start = (HIGH_ALLOW_FC / bin_hz).floor().max(0.0) as usize;
+        let n_bins = magnitudes.len();
+
+        let clamp = |v: usize| v.min(n_bins);
+        let li = 0usize;
+        let le = clamp(low_idx_end);
+        let mi = clamp(low_idx_end);
+        let me = clamp(high_idx_start);
+        let hi = clamp(high_idx_start);
+        let he = n_bins;
+
+        let sum_range = |v: &Vec<f32>, i: usize, e: usize| -> f32 { v[i..e].iter().copied().sum() };
+        let raw_low = if le > li { sum_range(&magnitudes, li, le) } else { 0.0 };
+        let raw_mid = if me > mi { sum_range(&magnitudes, mi, me) } else { 0.0 };
+        let raw_high = if he > hi { sum_range(&magnitudes, hi, he) } else { 0.0 };
+        let w_low = if le > li { sum_range(&weighted, li, le) } else { 0.0 };
+        let w_mid = if me > mi { sum_range(&weighted, mi, me) } else { 0.0 };
+        let w_high = if he > hi { sum_range(&weighted, hi, he) } else { 0.0 };
+
         // spectral flux (positive differences only) on weighted magnitudes
         let spectral_flux: f32 = weighted
             .iter()
@@ -223,12 +253,29 @@ impl AudioProcessor {
         // update previous weighted magnitudes for next frame
         self.prev_weighted_magnitudes.copy_from_slice(&weighted);
 
+        // trace: report energies and spectral flux to understand onset behavior
+        trace!(
+            "diag: bands raw(l/m/h)={:.2}/{:.2}/{:.2}, weighted(l/m/h)={:.2}/{:.2}/{:.2}, flux={:.3}",
+            raw_low,
+            raw_mid,
+            raw_high,
+            w_low,
+            w_mid,
+            w_high,
+            spectral_flux
+        );
+
         spectral_flux
     }
 
     /// calculate bpm from the history of onset strength values
     fn calculate_bpm(&mut self) -> f32 {
         if self.onset_history.len() < 20 {
+            // not enough data yet
+            trace!(
+                "diag: bpm skipped, onset_frames={} (<20)",
+                self.onset_history.len()
+            );
             return self.current_bpm;
         }
 
@@ -251,6 +298,14 @@ impl AudioProcessor {
         let search_end = max_lag.min(autocorr.len());
         let search_start = min_lag.min(search_end);
 
+        // trace: summarize search space
+        trace!(
+            "diag: bpm search lags={}..{}, hop_seconds={:.6}",
+            search_start,
+            search_end,
+            hop_seconds
+        );
+
         for lag in search_start..search_end {
             if autocorr[lag] > max_peak {
                 max_peak = autocorr[lag];
@@ -260,6 +315,7 @@ impl AudioProcessor {
 
         // if we couldn't find a valid peak yet, keep previous bpm
         if max_peak == 0.0 || peak_lag == 0 {
+            trace!("diag: no valid peak found, keeping bpm={:.1}", self.current_bpm);
             return self.current_bpm;
         }
 
@@ -278,6 +334,42 @@ impl AudioProcessor {
         }
         while folded > BPM_MAX {
             folded /= 2.0;
+        }
+
+        // trace: show top-3 peaks in range to understand competing periodicities
+        if search_end > search_start {
+            let mut ranked: Vec<(usize, f32)> =
+                (search_start..search_end).map(|lag| (lag, autocorr[lag])).collect();
+            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let tops = ranked.iter().take(3).map(|(lag, val)| {
+                let bpm = 60.0 / (*lag as f32 * hop_seconds);
+                let mut fbpm = bpm;
+                let mut k = 0;
+                while fbpm < BPM_MIN && k < 4 { fbpm *= 2.0; k += 1; }
+                while fbpm > BPM_MAX && k < 8 { fbpm /= 2.0; k += 1; }
+                (*lag, *val, bpm, fbpm)
+            }).collect::<Vec<_>>();
+            if let Some((l0, v0, b0, f0)) = tops.get(0).copied() {
+                let msg = if let Some((l1, v1, b1, f1)) = tops.get(1).copied() {
+                    if let Some((l2, v2, b2, f2)) = tops.get(2).copied() {
+                        format!(
+                            "diag: peaks [lag,val,bpm,folded] = [{},{:.3},{:.1},{:.1}] | [{},{:.3},{:.1},{:.1}] | [{},{:.3},{:.1},{:.1}]",
+                            l0, v0, b0, f0, l1, v1, b1, f1, l2, v2, b2, f2
+                        )
+                    } else {
+                        format!(
+                            "diag: peaks [lag,val,bpm,folded] = [{},{:.3},{:.1},{:.1}] | [{},{:.3},{:.1},{:.1}]",
+                            l0, v0, b0, f0, l1, v1, b1, f1
+                        )
+                    }
+                } else {
+                    format!(
+                        "diag: peak [lag,val,bpm,folded] = [{},{:.3},{:.1},{:.1}]",
+                        l0, v0, b0, f0
+                    )
+                };
+                trace!("{}", msg);
+            }
         }
 
         // compute confidence from autocorrelation: peak prominence vs local baseline
@@ -321,23 +413,51 @@ impl AudioProcessor {
             };
 
             // apply EMA on top of median for stability
-            let mut ema = if self.current_bpm > 0.0 {
+            let ema = if self.current_bpm > 0.0 {
                 BPM_EMA_ALPHA * median + (1.0 - BPM_EMA_ALPHA) * self.current_bpm
             } else {
                 median
             };
 
-            // apply slew rate limiting per update
+            // report acceptance
             if self.current_bpm > 0.0 {
                 let delta = ema - self.current_bpm;
-                if delta.abs() > BPM_MAX_STEP_PER_UPDATE {
-                    ema = self.current_bpm + delta.signum() * BPM_MAX_STEP_PER_UPDATE;
-                }
+                trace!(
+                    "diag: accept bpm: raw={:.1} folded={:.1}, baseline={:.3} conf={:.2} >= {:.2}, median={:.1}, ema={:.1} (prev {:.1}, delta {:.1})",
+                    raw_bpm,
+                    folded,
+                    baseline_median,
+                    confidence_ratio,
+                    BPM_MIN_CONFIDENCE_RATIO,
+                    median,
+                    ema,
+                    self.current_bpm,
+                    delta
+                );
+            } else {
+                trace!(
+                    "diag: initial bpm: raw={:.1} folded={:.1}, baseline={:.3} conf={:.2} >= {:.2}, median={:.1}",
+                    raw_bpm,
+                    folded,
+                    baseline_median,
+                    confidence_ratio,
+                    BPM_MIN_CONFIDENCE_RATIO,
+                    ema
+                );
             }
 
             return ema;
         } else {
             // keep previous bpm if confidence is low
+            trace!(
+                "diag: reject bpm: raw={:.1} folded={:.1}, baseline={:.3} conf={:.2} < {:.2}; keep {:.1}",
+                raw_bpm,
+                folded,
+                baseline_median,
+                confidence_ratio,
+                BPM_MIN_CONFIDENCE_RATIO,
+                self.current_bpm
+            );
             return self.current_bpm;
         }
     }
