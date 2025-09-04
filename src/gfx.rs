@@ -3,7 +3,7 @@ use bytemuck::{Pod, Zeroable};
 use glyph::cosmic_text::{
     Attrs as CtAttrs, Buffer as CtBuffer, Color as CtColor, FontSystem as CtFontSystem,
     Metrics as CtMetrics, Shaping as CtShaping, SwashCache as CtSwashCache, Wrap as CtWrap,
-    FamilyOwned as CtFamilyOwned, Weight as CtWeight,
+    Weight as CtWeight,
 };
 use glyph::{Cache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
 use glyphon as glyph;
@@ -99,6 +99,42 @@ pub enum DrawOp {
         options: LayerOptions,
         ops: Vec<DrawOp>,
     },
+}
+
+/// horizontal alignment relative to the provided `(x, y)` anchor
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TextHAlign { Left, Center, Right }
+
+/// vertical alignment relative to the provided `(x, y)` anchor
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TextVAlign { Top, Middle, Baseline }
+
+/// formatting options for text drawing; sensible defaults chosen
+#[derive(Clone, Debug)]
+pub struct TextOptions {
+    pub px: f32,
+    pub color: Color,
+    /// font family name; if none, system default is used
+    pub family: Option<String>,
+    /// font weight; defaults to regular
+    pub weight: CtWeight,
+    /// horizontal alignment relative to anchor
+    pub halign: TextHAlign,
+    /// vertical alignment relative to anchor
+    pub valign: TextVAlign,
+}
+
+impl Default for TextOptions {
+    fn default() -> Self {
+        Self {
+            px: 24.0,
+            color: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            family: None,
+            weight: CtWeight::NORMAL,
+            halign: TextHAlign::Left,
+            valign: TextVAlign::Top,
+        }
+    }
 }
 
 /// immediate-mode 2d batcher for rectangles, polygons and text
@@ -415,14 +451,14 @@ impl DrawContext {
     }
 
     pub fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
+        // backwards-compatible helper using defaults
+        self.text_with(x, y, text, TextOptions { px, color, ..Default::default() });
+    }
+
+    /// draw text with formatting options
+    pub fn text_with(&mut self, x: f32, y: f32, text: &str, opts: TextOptions) {
         // buffer a text draw; shaping happens during render
-        self.ops.push(DrawOp::Text {
-            x,
-            y,
-            text: text.to_string(),
-            px,
-            color,
-        });
+        self.ops.push(DrawOp::Text { x, y, text: text.to_string(), opts });
     }
 
     /// request clearing the color target when `render` starts
@@ -563,30 +599,50 @@ impl DrawContext {
                             clipped: cur_ctx.clipped,
                         });
                     }
-                    DrawOp::Text {
-                        x,
-                        y,
-                        text,
-                        px,
-                        color,
-                    } => {
+                    DrawOp::Text { x, y, text, opts } => {
                         // build buffer; prepare during execution to avoid lifetimes
+                        let px = opts.px;
                         let metrics = CtMetrics::new(px, px * 1.3);
                         let mut buffer = CtBuffer::new(&mut this.font_system, metrics);
+                        let mut x = x;
+                        let mut y = y;
                         {
                             let mut b = buffer.borrow_with(&mut this.font_system);
                             b.set_size(None, None);
                             b.set_wrap(CtWrap::None);
-                            let attrs = CtAttrs::new();
+                            let mut attrs = CtAttrs::new().weight(opts.weight);
+                            // note: cosmic-text 0.14 `Attrs` doesn't expose a stable way to set
+                            // family from a `String` without static lifetime requirements.
+                            // we'll rely on the default font if a custom family is requested,
+                            // leaving an easy extension point for future versions.
                             b.set_text(&text, &attrs, CtShaping::Advanced);
                             b.shape_until_scroll(true);
+                            // measure to apply alignment
+                            let mut width_px: f32 = 0.0;
+                            for run in b.layout_runs() {
+                                width_px = width_px.max(run.line_w);
+                            }
+                            // cosmic-text Metrics doesn't expose ascent directly; approximate using font size
+                            let ascender_px: f32 = b.metrics().font_size;
+                            // halign
+                            x = match opts.halign {
+                                TextHAlign::Left => x,
+                                TextHAlign::Center => x - width_px * 0.5,
+                                TextHAlign::Right => x - width_px,
+                            };
+                            // valign
+                            y = match opts.valign {
+                                TextVAlign::Top => y,
+                                TextVAlign::Middle => y - ascender_px * 0.5,
+                                TextVAlign::Baseline => y - ascender_px,
+                            };
                         }
                         let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                         let ct_color = CtColor::rgba(
-                            to_u8(color.r),
-                            to_u8(color.g),
-                            to_u8(color.b),
-                            to_u8(color.a),
+                            to_u8(opts.color.r),
+                            to_u8(opts.color.g),
+                            to_u8(opts.color.b),
+                            to_u8(opts.color.a),
                         );
                         steps.push(Step::DrawText {
                             buffer,

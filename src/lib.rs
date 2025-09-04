@@ -19,11 +19,6 @@ pub use lyon_geom as __vzr_lyon_geom;
 /// };
 #[macro_export]
 macro_rules! svg_path {
-    ( $( $cmd:tt )* ) => {{
-        let mut _svg = $crate::__vzr_lyon_path::Path::builder().with_svg();
-        svg_path!(@inner _svg, $( $cmd )* );
-        _svg.build()
-    }};
 
     (@inner $svg:ident, move_to($x:expr, $y:expr); $( $rest:tt )* ) => {{
         $svg.move_to($crate::__vzr_lyon_geom::point($x as f32, $y as f32));
@@ -60,6 +55,12 @@ macro_rules! svg_path {
         svg_path!(@inner $svg, $( $rest )* );
     }};
     (@inner $svg:ident, ) => {};
+
+    ( $( $cmd:tt )* ) => {{
+        let mut _svg = $crate::__vzr_lyon_path::Path::builder().with_svg();
+        svg_path!(@inner _svg, $( $cmd )* );
+        _svg.build()
+    }};
 }
 pub mod shared;
 pub mod ui;

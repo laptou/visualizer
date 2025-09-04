@@ -72,7 +72,7 @@ fn main() -> Result<()> {
                     move_to(cx - 40.0, cy + 20.0);
                     cubic_to(cx - 80.0, cy - 40.0, cx - 10.0, cy - 20.0, cx, cy);
                     cubic_to(cx + 10.0, cy - 20.0, cx + 80.0, cy - 40.0, cx + 40.0, cy + 20.0);
-                    arc_to(20.0, 20.0, 0.0, false, true, cx - 40.0, cy + 20.0);
+                    // arc_to(20.0, 20.0, 0.0, false, true, cx - 40.0, cy + 20.0);
                     close();
                 };
                 let _ = s.draw.svg_path(heart, Color::rgba(0.8, 0.2, 0.7, 0.7));
