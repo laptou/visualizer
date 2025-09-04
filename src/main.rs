@@ -28,9 +28,17 @@ struct Cli {
     #[arg(short, long)]
     device: Option<usize>,
     
+    /// config index for the selected device (use --list-configs to see options)
+    #[arg(short, long)]
+    config: Option<usize>,
+    
     /// list available input devices and exit
     #[arg(long)]
     list_devices: bool,
+    
+    /// list available configs for a device and exit (requires --device)
+    #[arg(long)]
+    list_configs: bool,
 }
 
 /// shared state for real-time audio processing
@@ -303,8 +311,13 @@ fn main() -> Result<()> {
 
     if cli.list_devices {
         list_input_devices()?;
+    } else if cli.list_configs {
+        if cli.device.is_none() {
+            return Err(anyhow::anyhow!("--list-configs requires --device to be specified"));
+        }
+        list_device_configs(cli.device.unwrap())?;
     } else {
-        run_input_mode(cli.device)?;
+        run_input_mode(cli.device, cli.config)?;
     }
 
     Ok(())
@@ -343,12 +356,63 @@ fn list_input_devices() -> Result<()> {
         }
     }
 
-    info!("\nusage: audio-visualizer --device <index>");
+    info!("\nusage: audio-visualizer --device <index> [--config <index>]");
     Ok(())
 }
 
-/// run the input mode with the specified device
-fn run_input_mode(device_index: Option<usize>) -> Result<()> {
+/// list all available configs for a specific device
+fn list_device_configs(device_index: usize) -> Result<()> {
+    let host = cpal::default_host();
+    let devices: Vec<_> = host.input_devices()?.collect();
+    
+    let device = devices
+        .into_iter()
+        .nth(device_index)
+        .ok_or_else(|| anyhow::anyhow!("input device index {} not found", device_index))?;
+
+    let device_name = device
+        .name()
+        .unwrap_or_else(|_| "Unknown Device".to_string());
+
+    info!("available configs for device {}: {}", device_index, device_name);
+
+    match device.supported_input_configs() {
+        Ok(configs) => {
+            for (config_index, config_range) in configs.enumerate() {
+                // show the range of sample rates supported by this config
+                let min_rate = config_range.min_sample_rate().0;
+                let max_rate = config_range.max_sample_rate().0;
+                let channels = config_range.channels();
+                let sample_format = config_range.sample_format();
+                let buffer_size = match config_range.buffer_size() {
+                    cpal::SupportedBufferSize::Range { min, max } => format!("{}-{}", min, max),
+                    cpal::SupportedBufferSize::Unknown => "unknown".to_string(),
+                };
+
+                if min_rate == max_rate {
+                    info!(
+                        "  {}: {}hz, {} channels, {:?}, buffer: {}",
+                        config_index, min_rate, channels, sample_format, buffer_size
+                    );
+                } else {
+                    info!(
+                        "  {}: {}-{}hz, {} channels, {:?}, buffer: {}",
+                        config_index, min_rate, max_rate, channels, sample_format, buffer_size
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("failed to get supported configs: {}", e));
+        }
+    }
+
+    info!("\nusage: audio-visualizer --device {} --config <index>", device_index);
+    Ok(())
+}
+
+/// run the input mode with the specified device and config
+fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>) -> Result<()> {
     info!("starting real-time onset detection and bpm analysis...");
 
     let host = cpal::default_host();
@@ -368,16 +432,35 @@ fn run_input_mode(device_index: Option<usize>) -> Result<()> {
     info!("using input device: {}", device.name()?);
 
     // get supported input configurations
-    let mut supported_configs = device.supported_input_configs()?;
-    let supported_config = supported_configs
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no supported input config"))?
-        .with_max_sample_rate();
+    let supported_configs: Vec<_> = device.supported_input_configs()?.collect();
+    
+    // select the specified config or use the first one with max sample rate as default
+    let supported_config = if let Some(config_idx) = config_index {
+        supported_configs
+            .get(config_idx)
+            .ok_or_else(|| anyhow::anyhow!("config index {} not found for device", config_idx))?
+            .clone()
+            .with_max_sample_rate()
+    } else {
+        supported_configs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no supported input config"))?
+            .clone()
+            .with_max_sample_rate()
+    };
 
+    let config_msg = if let Some(idx) = config_index {
+        format!("using config {}: ", idx)
+    } else {
+        "using default config: ".to_string()
+    };
+    
     info!(
-        "sample rate: {}, channels: {}",
+        "{}sample rate: {}, channels: {}, format: {:?}",
+        config_msg,
         supported_config.sample_rate().0,
-        supported_config.channels()
+        supported_config.channels(),
+        supported_config.sample_format()
     );
 
     // create stream configuration using the supported device config
