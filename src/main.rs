@@ -1,5 +1,6 @@
+use clap::{Parser, Subcommand};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, StreamConfig};
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
