@@ -305,13 +305,22 @@ impl DrawContext {
         // text: cache, atlas, renderer, viewport
         let cache = Cache::new(device);
         let mut text_atlas = TextAtlas::new(device, queue, &cache, format);
+        let text_ds_state = Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth24PlusStencil8,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             device,
             wgpu::MultisampleState::default(),
-            None,
+            text_ds_state,
         );
-        let viewport = Viewport::new(device, &cache);
+        // viewport controls the visible area for text; must be kept in sync with screen size
+        let mut viewport = Viewport::new(device, &cache);
+        viewport.update(queue, glyph::Resolution { width, height });
         // text renderer with stencil test enabled (equals 1)
         let stencil_state = Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth24PlusStencil8,
@@ -387,11 +396,18 @@ impl DrawContext {
             // recreate text atlas/renderer to match new surface format
             self.text_atlas =
                 TextAtlas::new(&self.device, &self.queue, &self.cache, self.surface_format);
+            let text_ds_state = Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24PlusStencil8,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            });
             self.text_renderer = TextRenderer::new(
                 &mut self.text_atlas,
                 &self.device,
                 wgpu::MultisampleState::default(),
-                None,
+                text_ds_state,
             );
             let stencil_state = Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth24PlusStencil8,
@@ -422,6 +438,8 @@ impl DrawContext {
                 stencil_state,
             );
         }
+        // keep glyphon viewport resolution in sync with current drawable size
+        self.viewport.update(&self.queue, glyph::Resolution { width: self.width, height: self.height });
         self.depth_view = create_depth_stencil_view(&self.device, self.width, self.height);
     }
 
@@ -776,6 +794,8 @@ impl DrawContext {
                     let (vbuf, ibuf, icount) = self.upload(vertices, indices);
                     rpass.set_pipeline(&self.pipeline_stencil_write);
                     rpass.set_stencil_reference(1);
+                    // rebind our screen uniforms after glyphon may have changed bind groups
+                    rpass.set_bind_group(0, &self.screen_bind_group, &[]);
                     rpass.set_vertex_buffer(0, vbuf.slice(..));
                     rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     rpass.draw_indexed(0..icount, 0, 0..1);
@@ -784,6 +804,8 @@ impl DrawContext {
                     let (vbuf, ibuf, icount) = self.upload(vertices, indices);
                     rpass.set_pipeline(&self.pipeline_stencil_write);
                     rpass.set_stencil_reference(0);
+                    // rebind our screen uniforms after glyphon may have changed bind groups
+                    rpass.set_bind_group(0, &self.screen_bind_group, &[]);
                     rpass.set_vertex_buffer(0, vbuf.slice(..));
                     rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     rpass.draw_indexed(0..icount, 0, 0..1);
@@ -805,6 +827,8 @@ impl DrawContext {
                         rpass.set_stencil_reference(1);
                     }
                     rpass.set_pipeline(pipe);
+                    // rebind our screen uniforms after glyphon may have changed bind groups
+                    rpass.set_bind_group(0, &self.screen_bind_group, &[]);
                     rpass.set_vertex_buffer(0, vbuf.slice(..));
                     rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     rpass.draw_indexed(0..icount, 0, 0..1);

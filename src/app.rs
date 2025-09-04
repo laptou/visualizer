@@ -1,6 +1,6 @@
 use anyhow::{Context as AnyhowContext, Result};
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info};
 use wgpu::{Device, Queue, TextureFormat};
 use winit::window::Window;
 
@@ -27,7 +27,8 @@ pub fn run_windowed<T, Init, Frame>(
 ) -> Result<()>
 where
     Init: FnOnce(&mut GpuContext) -> Result<T>,
-    Frame: FnMut(&mut GpuContext, &mut T, &mut wgpu::CommandEncoder, &wgpu::TextureView) -> Result<()>,
+    Frame:
+        FnMut(&mut GpuContext, &mut T, &mut wgpu::CommandEncoder, &wgpu::TextureView) -> Result<()>,
 {
     let event_loop = winit::event_loop::EventLoop::new()?;
     let window = winit::window::WindowBuilder::new()
@@ -53,8 +54,8 @@ where
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("device"),
         required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-            .using_resolution(adapter.limits()),
+        required_limits:
+            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
         ..Default::default()
     }))?;
 
@@ -91,6 +92,8 @@ where
     let mut state = init(&mut ctx)?;
 
     let window_for_loop = window.clone();
+    info!("event loop starting");
+
     event_loop.run(move |event, elwt| match event {
         winit::event::Event::WindowEvent { event, .. } => match event {
             winit::event::WindowEvent::CloseRequested => elwt.exit(),
@@ -117,7 +120,9 @@ where
                 .create_view(&wgpu::TextureViewDescriptor::default());
             let mut encoder = ctx
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("encoder"),
+                });
 
             if let Err(e) = frame(&mut ctx, &mut state, &mut encoder, &view) {
                 error!("frame error: {}", e);
@@ -132,5 +137,3 @@ where
     #[allow(unreachable_code)]
     Ok(())
 }
-
-
