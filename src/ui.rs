@@ -1,5 +1,5 @@
 use crate::gfx::Color;
-use crate::gfx::Immediate2D;
+use crate::gfx::DrawContext;
 use crate::shared::SharedState;
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
@@ -74,7 +74,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
     // immediate 2d renderer
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(queue);
-    let mut im2d = Immediate2D::new(
+    let mut draw = DrawContext::new(
         &device_arc,
         &queue_arc,
         config.format,
@@ -103,7 +103,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     config.width = new_size.width;
                     config.height = new_size.height;
                     surface.configure(&device_for_loop, &config);
-                    im2d.resize(config.format, config.width, config.height);
+                    draw.resize(config.format, config.width, config.height);
                 }
             }
             Event::AboutToWait => {
@@ -191,7 +191,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 }
 
                 // build immediate ui for this frame
-                im2d.begin_frame();
+                draw.begin_frame();
                 let w = config.width as f32;
                 let h = config.height as f32;
                 // animated rectangle based on beat phase
@@ -199,7 +199,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 let rect_h = 40.0;
                 let x = (w - rect_w) * phase;
                 let y = h * 0.1;
-                let _ = im2d.rect(x, y, rect_w, rect_h, Color::rgba(0.2, 0.8, 0.6, 1.0));
+                let _ = draw.rect(x, y, rect_w, rect_h, Color::rgba(0.2, 0.8, 0.6, 1.0));
                 // a simple polygon bar responding to rms
                 let bar_h = (avg_rms * 600.0).clamp(2.0, h * 0.5);
                 let poly = vec![
@@ -208,10 +208,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     [w * 0.1 + 10.0, h * 0.9 - bar_h],
                     [w * 0.1, h * 0.9 - bar_h],
                 ];
-                let _ = im2d.polygon(&poly, Color::rgba(0.9, 0.9, 0.2, 1.0));
+                let _ = draw.polygon(&poly, Color::rgba(0.9, 0.9, 0.2, 1.0));
                 // text showing bpm
                 if bpm > 0.0 {
-                    im2d.text(
+                    draw.text(
                         w * 0.05,
                         h * 0.08,
                         &format!("{:.1} bpm", bpm),
@@ -219,7 +219,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         Color::rgba(1.0, 1.0, 1.0, 1.0),
                     );
                 } else {
-                    im2d.text(
+                    draw.text(
                         w * 0.05,
                         h * 0.08,
                         "analyzing...",
@@ -229,7 +229,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 }
 
                 // render accumulated draws
-                im2d.render(&mut encoder, &view);
+                if let Err(e) = draw.render(&mut encoder, &view).context("drawcontext render") {
+                    error!("render error: {}", e);
+                }
                 queue_for_loop.submit(std::iter::once(encoder.finish()));
                 frame.present();
                 window_for_loop.request_redraw();

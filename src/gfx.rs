@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, Context as AnyhowContext};
 use bytemuck::{Pod, Zeroable};
 use glyph::cosmic_text::{
     Attrs as CtAttrs, Buffer as CtBuffer, Color as CtColor, FontSystem as CtFontSystem,
@@ -10,7 +10,7 @@ use lyon_geom as geom;
 use lyon_path as path;
 use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use std::sync::Arc;
-use tracing::error;
+// tracing used via anyhow context messages elsewhere
 use wgpu::{
     BindGroup, BindGroupLayout, BufferAddress, Device, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, TextureFormat, TextureView,
@@ -100,7 +100,7 @@ pub enum DrawOp {
 /// overview: shapes are tessellated via lyon into triangles and drawn with a
 /// simple colored pipeline. text is handled by glyphon (cosmic-text) in a
 /// separate pass.
-pub struct Immediate2D {
+pub struct DrawContext {
     device: Arc<Device>,
     queue: Arc<Queue>,
     surface_format: TextureFormat,
@@ -135,7 +135,7 @@ pub struct Immediate2D {
     ops: Vec<DrawOp>,
 }
 
-impl Immediate2D {
+impl DrawContext {
     pub fn new(
         device: &Arc<Device>,
         queue: &Arc<Queue>,
@@ -146,7 +146,7 @@ impl Immediate2D {
         // create shader
         let shader_src = include_str!("shaders/immediate.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("immediate2d shader"),
+            label: Some("drawcontext shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(shader_src)),
         });
 
@@ -181,7 +181,7 @@ impl Immediate2D {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("immediate2d pipeline layout"),
+            label: Some("drawcontext pipeline layout"),
             bind_group_layouts: &[&screen_bind_group_layout],
             push_constant_ranges: &[],
         });
@@ -382,15 +382,18 @@ impl Immediate2D {
     }
 
     pub fn begin_frame(&mut self) {
+        // clear buffered draw operations for the new frame
         self.ops.clear();
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) -> Result<()> {
+        // buffer a rectangle to be tessellated during render
         self.ops.push(DrawOp::Rect { x, y, w, h, color });
         Ok(())
     }
 
     pub fn polygon(&mut self, points: &[[f32; 2]], color: Color) -> Result<()> {
+        // buffer a convex or concave polygon; requires at least 3 points
         if points.len() < 3 {
             return Err(anyhow!("polygon needs at least 3 points"));
         }
@@ -402,6 +405,7 @@ impl Immediate2D {
     }
 
     pub fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
+        // buffer a text draw; shaping happens during render
         self.ops.push(DrawOp::Text {
             x,
             y,
@@ -421,7 +425,7 @@ impl Immediate2D {
     /// limitations:
     /// - text uses alpha blending; additive for text is not supported currently.
     /// - text inside a clip layer is masked using the stencil-enabled text renderer.
-    pub fn render(&mut self, encoder: &mut wgpu::CommandEncoder, view: &TextureView) {
+    pub fn render(&mut self, encoder: &mut wgpu::CommandEncoder, view: &TextureView) -> Result<()> {
         // build an execution plan: we tessellate shapes and set up text areas in cpu memory
         #[derive(Clone)]
         enum Step {
@@ -484,7 +488,7 @@ impl Immediate2D {
 
         // flatten ops recursively
         fn flatten(
-            this: &mut Immediate2D,
+            this: &mut DrawContext,
             ops: &[DrawOp],
             steps: &mut Vec<Step>,
             ctx: Ctx,
@@ -644,14 +648,12 @@ impl Immediate2D {
             clipped: false,
         };
         let ops_taken = std::mem::take(&mut self.ops);
-        if let Err(e) = flatten(self, &ops_taken, &mut steps, start_ctx, &mut tessellate_to) {
-            error!("flatten error: {:?}", e);
-            return;
-        }
+        flatten(self, &ops_taken, &mut steps, start_ctx, &mut tessellate_to)
+            .context("flatten draw ops")?;
 
         // execute steps in a single render pass with depth-stencil attachment
         let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("im2d"),
+            label: Some("drawctx"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view,
                 resolve_target: None,
@@ -678,7 +680,7 @@ impl Immediate2D {
 
         for step in steps.into_iter() {
             match step {
-                Step::SetBlend(b) => { /* handled per draw */ }
+                Step::SetBlend(_b) => { /* handled per draw */ }
                 Step::PushClip { vertices, indices } => {
                     let (vbuf, ibuf, icount) = self.upload(vertices, indices);
                     rpass.set_pipeline(&self.pipeline_stencil_write);
@@ -744,28 +746,29 @@ impl Immediate2D {
                         &mut self.text_renderer
                     };
 
-                    if let Err(e) = renderer.prepare(
-                        &self.device,
-                        &self.queue,
-                        &mut self.font_system,
-                        &mut self.text_atlas,
-                        &self.viewport,
-                        vec![area],
-                        &mut self.swash_cache,
-                    ) {
-                        error!("text prepare error: {:?}", e);
-                    }
+                    renderer
+                        .prepare(
+                            &self.device,
+                            &self.queue,
+                            &mut self.font_system,
+                            &mut self.text_atlas,
+                            &self.viewport,
+                            vec![area],
+                            &mut self.swash_cache,
+                        )
+                        .context("text prepare")?;
 
                     if clipped {
                         rpass.set_stencil_reference(1);
                     }
 
-                    if let Err(e) = renderer.render(&self.text_atlas, &self.viewport, &mut rpass) {
-                        error!("text render error: {:?}", e);
-                    }
+                    renderer
+                        .render(&self.text_atlas, &self.viewport, &mut rpass)
+                        .context("text render")?;
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -880,7 +883,7 @@ fn create_shape_pipeline(
     };
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("immediate2d pipeline"),
+        label: Some("drawcontext pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -905,7 +908,7 @@ fn create_shape_pipeline(
     })
 }
 
-impl Immediate2D {
+impl DrawContext {
     fn upload(
         &self,
         vertices: Vec<GpuVertex>,
@@ -933,7 +936,7 @@ impl Immediate2D {
     }
 
     /// create a layer and record sub-operations inside the closure
-    pub fn with_layer<F: FnOnce(&mut Immediate2D)>(&mut self, options: LayerOptions, f: F) {
+    pub fn with_layer<F: FnOnce(&mut DrawContext)>(&mut self, options: LayerOptions, f: F) {
         // temporarily swap the ops vec to capture into a child vec
         let mut child = Vec::new();
         std::mem::swap(&mut self.ops, &mut child);
