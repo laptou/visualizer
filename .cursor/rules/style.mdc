@@ -6,4 +6,4 @@ alwaysApply: true
 - write comments in lowercase and be succinct
 - write error messages and logging messages in lowercase
 - run outputs through `tracing`
-- run errors through `anyhow`
+- run errors through `anyhow`, prefer using `.context()` to other methods of converting errors to `anyhow::Error`

@@ -4,10 +4,14 @@ use lyon_geom as geom;
 use lyon_path as path;
 use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use std::sync::Arc;
+use tracing::error;
 use wgpu::{
     BindGroup, BindGroupLayout, BufferAddress, Device, Queue, RenderPassColorAttachment,
     RenderPassDescriptor, TextureFormat, TextureView,
 };
+use glyphon as glyph;
+use glyph::{TextAtlas, TextRenderer, Viewport, TextArea, TextBounds, Cache};
+use glyph::cosmic_text::{Buffer as CtBuffer, Metrics as CtMetrics, Attrs as CtAttrs, Shaping as CtShaping, Wrap as CtWrap, Color as CtColor, SwashCache as CtSwashCache, FontSystem as CtFontSystem};
 
 /// rgba color in linear space (0..1)
 #[derive(Copy, Clone, Debug)]
@@ -54,6 +58,15 @@ pub struct Immediate2D {
     // geometry accumulators per frame
     vertices: Vec<GpuVertex>,
     indices: Vec<u32>,
+
+    // text subsystem (glyphon/cosmic-text)
+    cache: Cache,
+    font_system: CtFontSystem,
+    swash_cache: CtSwashCache,
+    text_atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    viewport: Viewport,
+    text_items: Vec<TextItem>,
 }
 
 impl Immediate2D {
@@ -152,6 +165,17 @@ impl Immediate2D {
             cache: None,
         });
 
+        // text: cache, atlas, renderer, viewport
+        let cache = Cache::new(device);
+        let mut text_atlas = TextAtlas::new(device, queue, &cache, format);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let viewport = Viewport::new(device, &cache);
+
         let this = Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -164,6 +188,13 @@ impl Immediate2D {
             screen_uniform,
             vertices: Vec::new(),
             indices: Vec::new(),
+            cache,
+            font_system: CtFontSystem::new(),
+            swash_cache: CtSwashCache::new(),
+            text_atlas,
+            text_renderer,
+            viewport,
+            text_items: Vec::new(),
         };
         this.update_screen_uniform();
         Ok(this)
@@ -176,15 +207,27 @@ impl Immediate2D {
     }
 
     pub fn resize(&mut self, format: TextureFormat, width: u32, height: u32) {
+        let format_changed = self.surface_format != format;
         self.surface_format = format;
         self.width = width;
         self.height = height;
         self.update_screen_uniform();
+        if format_changed {
+            // recreate text atlas/renderer to match new surface format
+            self.text_atlas = TextAtlas::new(&self.device, &self.queue, &self.cache, self.surface_format);
+            self.text_renderer = TextRenderer::new(
+                &mut self.text_atlas,
+                &self.device,
+                wgpu::MultisampleState::default(),
+                None,
+            );
+        }
     }
 
     pub fn begin_frame(&mut self) {
         self.vertices.clear();
         self.indices.clear();
+        self.text_items.clear();
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) -> Result<()> {
@@ -236,8 +279,25 @@ impl Immediate2D {
         Ok(())
     }
 
-    pub fn text(&mut self, _x: f32, _y: f32, _text: &str, _px: f32, _color: Color) {
-        // text rendering will be wired up with cosmic-text in a future step
+    pub fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
+        // build a buffer for this text snippet
+        // metrics: font size (px) and line height (px)
+        let metrics = CtMetrics::new(px, px * 1.3);
+        let mut buffer = CtBuffer::new(&mut self.font_system, metrics);
+        {
+            let mut b = buffer.borrow_with(&mut self.font_system);
+            b.set_size(None, None);
+            b.set_wrap(CtWrap::None);
+            let attrs = CtAttrs::new();
+            b.set_text(text, &attrs, CtShaping::Advanced);
+            b.shape_until_scroll(true);
+        }
+
+        // convert color to cosmic-text color (expects 0..255)
+        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let ct_color = CtColor::rgba(to_u8(color.r), to_u8(color.g), to_u8(color.b), to_u8(color.a));
+
+        self.text_items.push(TextItem { buffer, x, y, color: ct_color });
     }
 
     /// record draw commands into the encoder targeting the given view
@@ -283,9 +343,71 @@ impl Immediate2D {
             rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
             rpass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
         }
+        // text pass
+        if !self.text_items.is_empty() {
+            let mut areas: Vec<TextArea> = Vec::with_capacity(self.text_items.len());
+            let bounds = TextBounds {
+                left: 0,
+                top: 0,
+                right: self.width as i32,
+                bottom: self.height as i32,
+            };
 
-        // text pass omitted in this scaffolding stage
+            for item in &self.text_items {
+                areas.push(TextArea {
+                    buffer: &item.buffer,
+                    left: item.x,
+                    top: item.y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: item.color,
+                    custom_glyphs: &[],
+                });
+            }
+
+            if let Err(e) = self.text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.text_atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash_cache,
+            ) {
+                error!("text prepare error: {:?}", e);
+            } else {
+                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("im2d text"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                if let Err(e) = self.text_renderer.render(
+                    &self.text_atlas,
+                    &self.viewport,
+                    &mut rpass,
+                ) {
+                    error!("text render error: {:?}", e);
+                }
+            }
+        }
     }
+}
+
+// transient record for a queued text draw
+struct TextItem {
+    buffer: CtBuffer,
+    x: f32,
+    y: f32,
+    color: CtColor,
 }
 
 const IMMEDIATE_WGSL: &str = r#"
