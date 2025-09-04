@@ -20,22 +20,10 @@ fn main() -> Result<()> {
                 Ok(State { draw })
             },
             |ctx: &mut GpuContext, s: &mut State, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView| {
-                // clear
-                {
-                    let _r = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("clear"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view,
-                            resolve_target: None,
-                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.07, g: 0.07, b: 0.08, a: 1.0 }), store: wgpu::StoreOp::Store },
-                        })],
-                        depth_stencil_attachment: None,
-                        occlusion_query_set: None,
-                        timestamp_writes: None,
-                    });
-                }
-
                 s.draw.begin_frame();
+                // clear via draw context api
+                s.draw.clear(Color::rgba(0.07, 0.07, 0.08, 1.0));
+                
                 let w = ctx.config.width as f32;
                 let h = ctx.config.height as f32;
                 let _ = s.draw.rect(w * 0.15, h * 0.25, w * 0.7, h * 0.5, Color::rgba(0.2, 0.3, 0.6, 1.0));

@@ -3,6 +3,7 @@ use bytemuck::{Pod, Zeroable};
 use glyph::cosmic_text::{
     Attrs as CtAttrs, Buffer as CtBuffer, Color as CtColor, FontSystem as CtFontSystem,
     Metrics as CtMetrics, Shaping as CtShaping, SwashCache as CtSwashCache, Wrap as CtWrap,
+    FamilyOwned as CtFamilyOwned, Weight as CtWeight,
 };
 use glyph::{Cache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
 use glyphon as glyph;
@@ -87,7 +88,11 @@ pub enum DrawOp {
         x: f32,
         y: f32,
         text: String,
-        px: f32,
+        opts: TextOptions,
+    },
+    /// svg-style path supporting lines, beziers, and arcs
+    SvgPath {
+        path: path::Path,
         color: Color,
     },
     Layer {
@@ -133,6 +138,8 @@ pub struct DrawContext {
 
     // buffered commands
     ops: Vec<DrawOp>,
+    // requested clear color for the next render pass
+    clear_color: Option<Color>,
 }
 
 impl DrawContext {
@@ -322,6 +329,7 @@ impl DrawContext {
             viewport,
             depth_view,
             ops: Vec::new(),
+            clear_color: None,
         };
         this.update_screen_uniform();
         Ok(this)
@@ -384,6 +392,8 @@ impl DrawContext {
     pub fn begin_frame(&mut self) {
         // clear buffered draw operations for the new frame
         self.ops.clear();
+        // reset clear color; user must request again per frame
+        self.clear_color = None;
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) -> Result<()> {
@@ -413,6 +423,17 @@ impl DrawContext {
             px,
             color,
         });
+    }
+
+    /// request clearing the color target when `render` starts
+    pub fn clear(&mut self, color: Color) {
+        self.clear_color = Some(color);
+    }
+
+    /// draw an svg-style path; caller provides a lyon `Path`
+    pub fn svg_path(&mut self, p: path::Path, color: Color) -> Result<()> {
+        self.ops.push(DrawOp::SvgPath { path: p, color });
+        Ok(())
     }
 
     /// translate buffered operations into wgpu commands and execute them in submission order.
@@ -526,6 +547,15 @@ impl DrawContext {
                         builder.end(true);
                         let p = builder.build();
                         let (v, i) = tessellate_to(&p, color, cur_ctx.z)?;
+                        steps.push(Step::DrawShape {
+                            vertices: v,
+                            indices: i,
+                            blend: cur_ctx.blend,
+                            clipped: cur_ctx.clipped,
+                        });
+                    }
+                    DrawOp::SvgPath { path, color } => {
+                        let (v, i) = tessellate_to(&path, color, cur_ctx.z)?;
                         steps.push(Step::DrawShape {
                             vertices: v,
                             indices: i,
@@ -658,17 +688,22 @@ impl DrawContext {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: match self.clear_color {
+                        Some(c) => wgpu::LoadOp::Clear(wgpu::Color { r: c.r as f64, g: c.g as f64, b: c.b as f64, a: c.a as f64 }),
+                        None => wgpu::LoadOp::Load,
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.depth_view,
                 depth_ops: Some(wgpu::Operations {
+                    // we always reset depth to far for each frame. clear regardless of color clear
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: Some(wgpu::Operations {
+                    // reset stencil mask each frame
                     load: wgpu::LoadOp::Clear(0),
                     store: wgpu::StoreOp::Store,
                 }),
