@@ -1,58 +1,53 @@
-use clap::{Parser, Subcommand};
+use anyhow::Result;
+use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tracing::{error, info};
 
-/// Configuration constants for audio processing
+/// configuration constants for audio processing
 const SAMPLE_RATE: u32 = 44100;
-const CHANNELS: u16 = 1; // Mono input
-const BUFFER_SIZE: usize = 1024; // FFT window size
-const HOP_SIZE: usize = 512; // Overlap between windows (50% overlap)
-const ONSET_HISTORY_SIZE: usize = 100; // Number of onset strength values to keep for BPM calculation
-const SILENCE_THRESHOLD: f32 = 0.001; // RMS threshold below which audio is considered silence
-const BPM_SMOOTHING_WINDOW: usize = 5; // Number of BPM values to average for smoothing
+const CHANNELS: u16 = 1; // mono input
+const BUFFER_SIZE: usize = 1024; // fft window size
+const HOP_SIZE: usize = 512; // overlap between windows (50% overlap)
+const ONSET_HISTORY_SIZE: usize = 100; // number of onset strength values to keep for bpm calculation
+const SILENCE_THRESHOLD: f32 = 0.001; // rms threshold below which audio is considered silence
+const BPM_SMOOTHING_WINDOW: usize = 10; // number of bpm values to average for smoothing
+const LOW_FREQ_WEIGHT: f32 = 2.0; // weight boost for low frequencies (bass/kick drums)
+const HIGH_FREQ_CUTOFF: f32 = 0.3; // fraction of spectrum to consider (focus on lower frequencies)
 
-/// Command-line interface for the audio visualizer
+/// command-line interface for the audio visualizer
 #[derive(Parser)]
 #[command(name = "audio-visualizer")]
-#[command(about = "Real-time audio onset detection and BPM analysis")]
+#[command(about = "real-time audio onset detection and bpm analysis")]
 struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+    /// input device index (use --list-devices to see options)
+    #[arg(short, long)]
+    device: Option<usize>,
+    
+    /// list available input devices and exit
+    #[arg(long)]
+    list_devices: bool,
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// List available input devices and exit
-    ListDevices,
-    /// Use microphone or input device for analysis
-    Input {
-        /// Input device index (use list-devices to see options)
-        #[arg(short, long)]
-        device: Option<usize>,
-    },
-    /// Create virtual output device for audio routing (not yet implemented)
-    Output,
-}
-
-/// Shared state for real-time audio processing
+/// shared state for real-time audio processing
 struct AudioProcessor {
-    /// Ring buffer to store incoming audio samples
+    /// ring buffer to store incoming audio samples
     sample_buffer: VecDeque<f32>,
-    /// History of onset strength values for BPM calculation
+    /// history of onset strength values for bpm calculation
     onset_history: VecDeque<f32>,
-    /// Last time BPM was calculated and printed
+    /// last time bpm was calculated and printed
     last_bpm_print: Instant,
-    /// Current estimated BPM
+    /// current estimated bpm
     current_bpm: f32,
-    /// History of BPM values for smoothing
+    /// history of bpm values for smoothing
     bpm_history: VecDeque<f32>,
-    /// Previous magnitude spectrum for spectral flux calculation
+    /// previous magnitude spectrum for spectral flux calculation
     prev_magnitudes: Vec<f32>,
-    /// Running RMS for silence detection
+    /// running rms for silence detection
     rms_history: VecDeque<f32>,
 }
 
@@ -69,49 +64,50 @@ impl AudioProcessor {
         }
     }
 
-    /// Add new audio samples to the buffer and process if we have enough data
+    /// add new audio samples to the buffer and process if we have enough data
     fn add_samples(&mut self, samples: &[f32]) {
-        // Calculate RMS for this chunk of samples for silence detection
+        // calculate rms for this chunk of samples for silence detection
         let rms = (samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32).sqrt();
         self.rms_history.push_back(rms);
         if self.rms_history.len() > 10 {
             self.rms_history.pop_front();
         }
 
-        // Add new samples to the ring buffer
+        // add new samples to the ring buffer
         for &sample in samples {
             self.sample_buffer.push_back(sample);
-            
-            // Keep buffer size manageable - remove old samples
+
+            // keep buffer size manageable - remove old samples
             if self.sample_buffer.len() > BUFFER_SIZE * 2 {
                 self.sample_buffer.pop_front();
             }
         }
 
-        // Process audio if we have enough samples for analysis
+        // process audio if we have enough samples for analysis
         if self.sample_buffer.len() >= BUFFER_SIZE {
             self.process_audio_window();
         }
 
-        // Print BPM once per second
+        // print bpm once per second
         if self.last_bpm_print.elapsed() >= Duration::from_secs(1) {
             let avg_rms = self.rms_history.iter().sum::<f32>() / self.rms_history.len() as f32;
-            
+
             if avg_rms < SILENCE_THRESHOLD {
-                println!("Current BPM: N/A (silence detected)");
+                info!("current bpm: n/a (silence detected)");
             } else if self.current_bpm > 0.0 {
-                println!("Current BPM: {:.1}", self.current_bpm);
+                info!("current bpm: {:.1}", self.current_bpm);
             } else {
-                println!("Current BPM: N/A (analyzing...)");
+                info!("current bpm: n/a (analyzing...)");
             }
             self.last_bpm_print = Instant::now();
         }
     }
 
-    /// Process a window of audio samples for onset detection
+    /// process a window of audio samples for onset detection
     fn process_audio_window(&mut self) {
-        // Extract the most recent BUFFER_SIZE samples for analysis
-        let window: Vec<f32> = self.sample_buffer
+        // extract the most recent buffer_size samples for analysis
+        let window: Vec<f32> = self
+            .sample_buffer
             .iter()
             .skip(self.sample_buffer.len().saturating_sub(BUFFER_SIZE))
             .copied()
@@ -121,35 +117,39 @@ impl AudioProcessor {
             return;
         }
 
-        // Calculate onset strength for this window
+        // calculate onset strength for this window
         let onset_strength = self.calculate_onset_strength(&window);
-        
-        // Add to onset history for BPM calculation
+
+        // add to onset history for bpm calculation
         self.onset_history.push_back(onset_strength);
         if self.onset_history.len() > ONSET_HISTORY_SIZE {
             self.onset_history.pop_front();
         }
 
-        // Calculate BPM from onset history if we have enough data
-        if self.onset_history.len() >= 20 { // Need at least 20 frames for meaningful BPM
+        // calculate bpm from onset history if we have enough data
+        if self.onset_history.len() >= 20 {
+            // need at least 20 frames for meaningful bpm
             self.current_bpm = self.calculate_bpm();
         }
     }
 
-    /// Calculate onset strength using spectral flux method
-    /// This measures the change in spectral energy between consecutive frames
+    /// calculate onset strength using frequency-weighted spectral flux method
+    /// this measures the change in spectral energy between consecutive frames,
+    /// with emphasis on low frequencies where beat information is most reliable
     fn calculate_onset_strength(&mut self, window: &[f32]) -> f32 {
-        // Apply Hanning window to reduce spectral leakage
+        // apply hanning window to reduce spectral leakage
         let windowed: Vec<f32> = window
             .iter()
             .enumerate()
             .map(|(i, &sample)| {
-                let hann_coeff = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (BUFFER_SIZE - 1) as f32).cos());
+                let hann_coeff = 0.5
+                    * (1.0
+                        - (2.0 * std::f32::consts::PI * i as f32 / (BUFFER_SIZE - 1) as f32).cos());
                 sample * hann_coeff
             })
             .collect();
 
-        // Compute FFT to get frequency domain representation
+        // compute fft to get frequency domain representation
         let mut fft_input: Vec<rustfft::num_complex::Complex<f32>> = windowed
             .iter()
             .map(|&x| rustfft::num_complex::Complex::new(x, 0.0))
@@ -159,66 +159,73 @@ impl AudioProcessor {
         let fft = planner.plan_fft_forward(BUFFER_SIZE);
         fft.process(&mut fft_input);
 
-        // Calculate magnitude spectrum
+        // calculate magnitude spectrum - focus on lower frequencies for beat detection
+        let freq_bins_to_use = ((BUFFER_SIZE / 2) as f32 * HIGH_FREQ_CUTOFF) as usize;
         let magnitudes: Vec<f32> = fft_input
             .iter()
-            .take(BUFFER_SIZE / 2) // Only use positive frequencies
+            .take(freq_bins_to_use) // only use lower frequencies
             .map(|complex| complex.norm())
             .collect();
 
-        // Calculate spectral centroid (center of mass of the spectrum)
-        // This gives us information about the "brightness" of the sound
-        let total_magnitude: f32 = magnitudes.iter().sum();
-        let weighted_sum: f32 = magnitudes
-            .iter()
-            .enumerate()
-            .map(|(i, &mag)| i as f32 * mag)
-            .sum();
-
-        let spectral_centroid = if total_magnitude > 0.0 {
-            weighted_sum / total_magnitude
-        } else {
-            0.0
-        };
-
-        // Calculate spectral flux (change in spectral energy between frames)
-        // This is the proper way to detect onsets - compare current frame to previous
-        let spectral_flux: f32 = magnitudes
+        // calculate frequency-weighted spectral flux
+        // give more weight to low frequencies (bass/kick drums) and less to high frequencies
+        let weighted_spectral_flux: f32 = magnitudes
             .iter()
             .zip(self.prev_magnitudes.iter())
-            .map(|(&current, &previous)| (current - previous).max(0.0)) // Only positive changes
+            .enumerate()
+            .map(|(bin, (&current, &previous))| {
+                let flux = (current - previous).max(0.0); // only positive changes
+                
+                // create frequency weighting: boost low frequencies, reduce high frequencies
+                let freq_ratio = bin as f32 / magnitudes.len() as f32;
+                let weight = if freq_ratio < 0.2 {
+                    // boost bass frequencies (0-20% of spectrum)
+                    LOW_FREQ_WEIGHT
+                } else if freq_ratio < 0.5 {
+                    // normal weight for mid frequencies (20-50% of spectrum)
+                    1.0
+                } else {
+                    // reduce weight for higher frequencies (50%+ of spectrum)
+                    0.5
+                };
+                
+                flux * weight
+            })
             .sum();
 
-        // Update previous magnitudes for next frame
+        // update previous magnitudes for next frame (resize if needed)
+        if self.prev_magnitudes.len() != magnitudes.len() {
+            self.prev_magnitudes.resize(magnitudes.len(), 0.0);
+        }
         self.prev_magnitudes.copy_from_slice(&magnitudes);
 
-        // Combine spectral centroid and flux for onset strength
-        // Spectral flux is the primary indicator, centroid adds brightness information
-        spectral_flux + spectral_centroid * 0.001
+        // return weighted spectral flux as onset strength
+        // removed spectral centroid as it was adding noise from high frequencies
+        weighted_spectral_flux
     }
 
-    /// Calculate BPM from the history of onset strength values
+    /// calculate bpm from the history of onset strength values
     fn calculate_bpm(&mut self) -> f32 {
         if self.onset_history.len() < 20 {
             return self.current_bpm;
         }
 
-        // Convert onset history to Vec for FFT processing
+        // convert onset history to vec for fft processing
         let onset_data: Vec<f32> = self.onset_history.iter().copied().collect();
-        
-        // Apply autocorrelation to find periodic patterns in onset strength
+
+        // apply autocorrelation to find periodic patterns in onset strength
         let autocorr = self.autocorrelation(&onset_data);
-        
-        // Find the peak in autocorrelation (excluding the zero-lag peak)
+
+        // find the peak in autocorrelation (excluding the zero-lag peak)
         let mut max_peak = 0.0;
         let mut peak_lag = 1;
-        
-        // Search for peaks in a reasonable BPM range (60-180 BPM)
-        // Each onset strength value represents HOP_SIZE samples at SAMPLE_RATE
+
+        // search for peaks in a reasonable bpm range (60-180 bpm)
+        // each onset strength value represents hop_size samples at sample_rate
         let samples_per_onset = HOP_SIZE as f32;
-        let min_lag = ((60.0 / 180.0) * SAMPLE_RATE as f32 / samples_per_onset) as usize; // 180 BPM
-        let max_lag = ((60.0 / 60.0) * SAMPLE_RATE as f32 / samples_per_onset) as usize;  // 60 BPM
-        
+        let min_lag = ((60.0 / 180.0) * SAMPLE_RATE as f32 / samples_per_onset) as usize; // 180 bpm
+        let max_lag = ((60.0 / 60.0) * SAMPLE_RATE as f32 / samples_per_onset) as usize; // 60 bpm
+
         for lag in min_lag..max_lag.min(autocorr.len()) {
             if autocorr[lag] > max_peak {
                 max_peak = autocorr[lag];
@@ -226,32 +233,32 @@ impl AudioProcessor {
             }
         }
 
-        // Convert lag back to BPM
-        // BPM = 60 * sample_rate / (lag * samples_per_onset)
+        // convert lag back to bpm
+        // bpm = 60 * sample_rate / (lag * samples_per_onset)
         let raw_bpm = if peak_lag > 0 {
             60.0 * SAMPLE_RATE as f32 / (peak_lag as f32 * samples_per_onset)
         } else {
-            return self.current_bpm; // Keep previous BPM if no peak found
+            return self.current_bpm; // keep previous bpm if no peak found
         };
 
-        // Add to BPM history for smoothing
+        // add to bpm history for smoothing
         self.bpm_history.push_back(raw_bpm);
         if self.bpm_history.len() > BPM_SMOOTHING_WINDOW {
             self.bpm_history.pop_front();
         }
 
-        // Return smoothed BPM (median filter to reduce outliers)
+        // return smoothed bpm (median filter to reduce outliers)
         if self.bpm_history.len() >= 3 {
             let mut sorted_bpm: Vec<f32> = self.bpm_history.iter().copied().collect();
             sorted_bpm.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            sorted_bpm[sorted_bpm.len() / 2] // Median
+            sorted_bpm[sorted_bpm.len() / 2] // median
         } else {
             raw_bpm
         }
     }
 
-    /// Calculate autocorrelation of the input signal
-    /// This helps find periodic patterns in the onset strength
+    /// calculate autocorrelation of the input signal
+    /// this helps find periodic patterns in the onset strength
     fn autocorrelation(&self, signal: &[f32]) -> Vec<f32> {
         let n = signal.len();
         let mut result = vec![0.0; n];
@@ -272,119 +279,122 @@ impl AudioProcessor {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
+    // initialize tracing subscriber for logging
+    tracing_subscriber::fmt::init();
+    
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::ListDevices => {
-            list_input_devices()?;
-        }
-        Commands::Input { device } => {
-            run_input_mode(device)?;
-        }
-        Commands::Output => {
-            println!("Output mode (virtual audio device) is not yet implemented.");
-            println!("This would create a virtual audio device that applications could route audio to.");
-            return Ok(());
-        }
+    if cli.list_devices {
+        list_input_devices()?;
+    } else {
+        run_input_mode(cli.device)?;
     }
 
     Ok(())
 }
 
-/// List all available input devices
-fn list_input_devices() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Available input devices:");
-    
+/// list all available input devices
+fn list_input_devices() -> Result<()> {
+    info!("available input devices:");
+
     let host = cpal::default_host();
     let devices = host.input_devices()?;
 
     for (index, device) in devices.enumerate() {
-        let device_name = device.name().unwrap_or_else(|_| "Unknown Device".to_string());
-        
+        let device_name = device
+            .name()
+            .unwrap_or_else(|_| "Unknown Device".to_string());
+
         // Try to get supported configurations
         match device.supported_input_configs() {
             Ok(mut configs) => {
                 if let Some(config) = configs.next() {
-                    println!("  {}: {} ({}Hz, {} channels)", 
-                        index, 
-                        device_name, 
+                    info!(
+                        "  {}: {} ({}hz, {} channels)",
+                        index,
+                        device_name,
                         config.max_sample_rate().0,
                         config.channels()
                     );
                 } else {
-                    println!("  {}: {} (no supported configs)", index, device_name);
+                    info!("  {}: {} (no supported configs)", index, device_name);
                 }
             }
             Err(_) => {
-                println!("  {}: {} (config query failed)", index, device_name);
+                info!("  {}: {} (config query failed)", index, device_name);
             }
         }
     }
-    
-    println!("\nUsage: audio-visualizer input --device <INDEX>");
+
+    info!("\nusage: audio-visualizer --device <index>");
     Ok(())
 }
 
-/// Run the input mode with the specified device
-fn run_input_mode(device_index: Option<usize>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting real-time onset detection and BPM analysis...");
-    
+/// run the input mode with the specified device
+fn run_input_mode(device_index: Option<usize>) -> Result<()> {
+    info!("starting real-time onset detection and bpm analysis...");
+
     let host = cpal::default_host();
-    
+
     // Get the specified device or default
     let device = if let Some(index) = device_index {
         let devices: Vec<_> = host.input_devices()?.collect();
-        devices.into_iter()
+        devices
+            .into_iter()
             .nth(index)
-            .ok_or_else(|| format!("Input device index {} not found", index))?
+            .ok_or_else(|| anyhow::anyhow!("input device index {} not found", index))?
     } else {
         host.default_input_device()
-            .ok_or("No default input device available")?
+            .ok_or_else(|| anyhow::anyhow!("no default input device available"))?
     };
 
-    println!("Using input device: {}", device.name()?);
+    info!("using input device: {}", device.name()?);
 
-    // Get supported input configurations
+    // get supported input configurations
     let mut supported_configs = device.supported_input_configs()?;
     let supported_config = supported_configs
         .next()
-        .ok_or("No supported input config")?
+        .ok_or_else(|| anyhow::anyhow!("no supported input config"))?
         .with_max_sample_rate();
 
-    println!("Sample rate: {}, Channels: {}", supported_config.sample_rate().0, supported_config.channels());
+    info!(
+        "sample rate: {}, channels: {}",
+        supported_config.sample_rate().0,
+        supported_config.channels()
+    );
 
-    // Create stream configuration
+    // create stream configuration
     let config = StreamConfig {
         channels: CHANNELS,
         sample_rate: cpal::SampleRate(SAMPLE_RATE),
         buffer_size: cpal::BufferSize::Default,
     };
 
-    // Create shared processor state
+    // create shared processor state
     let processor = Arc::new(Mutex::new(AudioProcessor::new()));
 
-    // Build input stream with callback for processing audio data
+    // build input stream with callback for processing audio data
     let stream = build_input_stream(&device, &config, &supported_config, processor.clone())?;
 
-    // Start the audio stream
+    // start the audio stream
     stream.play()?;
-    println!("Audio stream started. Listening for audio input...");
-    println!("Press Ctrl+C to stop.");
+    info!("audio stream started. listening for audio input...");
+    info!("press ctrl+c to stop.");
 
-    // Keep the main thread alive
+    // keep the main thread alive
     loop {
         thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Build an input stream that handles different sample formats
+/// build an input stream that handles different sample formats
 fn build_input_stream(
     device: &Device,
     config: &StreamConfig,
     supported_config: &cpal::SupportedStreamConfig,
     processor: Arc<Mutex<AudioProcessor>>,
-) -> Result<Stream, Box<dyn std::error::Error>> {
+) -> Result<Stream> {
     let stream = match supported_config.sample_format() {
         SampleFormat::F32 => {
             let processor_clone = processor.clone();
@@ -395,52 +405,55 @@ fn build_input_stream(
                         proc.add_samples(data);
                     }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                |err| error!("audio stream error: {}", err),
                 None,
             )?
-        },
+        }
         SampleFormat::I16 => {
             let processor_clone = processor.clone();
             device.build_input_stream(
                 config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    // Convert i16 samples to f32
+                    // convert i16 samples to f32
                     let float_data: Vec<f32> = data
                         .iter()
                         .map(|&sample| sample as f32 / i16::MAX as f32)
                         .collect();
-                    
+
                     if let Ok(mut proc) = processor_clone.lock() {
                         proc.add_samples(&float_data);
                     }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                |err| error!("audio stream error: {}", err),
                 None,
             )?
-        },
+        }
         SampleFormat::U16 => {
             let processor_clone = processor.clone();
             device.build_input_stream(
                 config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    // Convert u16 samples to f32
+                    // convert u16 samples to f32
                     let float_data: Vec<f32> = data
                         .iter()
-                        .map(|&sample| (sample as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))
+                        .map(|&sample| {
+                            (sample as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
+                        })
                         .collect();
-                    
+
                     if let Ok(mut proc) = processor_clone.lock() {
                         proc.add_samples(&float_data);
                     }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                |err| error!("audio stream error: {}", err),
                 None,
             )?
-        },
+        }
         sample_format => {
-            return Err(format!("Unsupported sample format: {}", sample_format).into());
+            return Err(anyhow::anyhow!("unsupported sample format: {}", sample_format));
         }
     };
 
     Ok(stream)
 }
+
