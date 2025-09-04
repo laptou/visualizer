@@ -9,15 +9,15 @@ use std::time::{Duration, Instant};
 use tracing::{error, info};
 
 /// configuration constants for audio processing
-const SAMPLE_RATE: u32 = 44100;
-const CHANNELS: u16 = 1; // mono input
 const BUFFER_SIZE: usize = 1024; // fft window size
-const HOP_SIZE: usize = 512; // overlap between windows (50% overlap)
-const ONSET_HISTORY_SIZE: usize = 100; // number of onset strength values to keep for bpm calculation
+const HOP_SIZE: usize = 512; // analysis hop size (50% overlap)
+const ONSET_HISTORY_SIZE: usize = 128; // number of onset strength values to keep for bpm calculation
 const SILENCE_THRESHOLD: f32 = 0.001; // rms threshold below which audio is considered silence
-const BPM_SMOOTHING_WINDOW: usize = 10; // number of bpm values to average for smoothing
-const LOW_FREQ_WEIGHT: f32 = 2.0; // weight boost for low frequencies (bass/kick drums)
-const HIGH_FREQ_CUTOFF: f32 = 0.3; // fraction of spectrum to consider (focus on lower frequencies)
+const BPM_SMOOTHING_WINDOW: usize = 21; // median smoothing window for bpm
+const BPM_EMA_ALPHA: f32 = 0.1; // additional EMA smoothing factor
+const BPM_MIN: f32 = 80.0; // preferred bpm lower bound for folding
+const BPM_MAX: f32 = 160.0; // preferred bpm upper bound for folding
+const BPM_MAX_STEP_PER_UPDATE: f32 = 5.0; // limit change per update
 
 /// command-line interface for the audio visualizer
 #[derive(Parser)]
@@ -45,26 +45,32 @@ struct AudioProcessor {
     current_bpm: f32,
     /// history of bpm values for smoothing
     bpm_history: VecDeque<f32>,
-    /// previous magnitude spectrum for spectral flux calculation
-    prev_magnitudes: Vec<f32>,
+    /// previous weighted magnitude spectrum for spectral flux calculation
+    prev_weighted_magnitudes: Vec<f32>,
     /// running rms for silence detection
     rms_history: VecDeque<f32>,
+    /// actual sample rate in Hz
+    sample_rate: u32,
+    /// analysis hop size in samples
+    hop_size: usize,
 }
 
 impl AudioProcessor {
-    fn new() -> Self {
+    fn new(sample_rate: u32, hop_size: usize) -> Self {
         Self {
             sample_buffer: VecDeque::with_capacity(BUFFER_SIZE * 2),
             onset_history: VecDeque::with_capacity(ONSET_HISTORY_SIZE),
             last_bpm_print: Instant::now(),
             current_bpm: 0.0,
             bpm_history: VecDeque::with_capacity(BPM_SMOOTHING_WINDOW),
-            prev_magnitudes: vec![0.0; BUFFER_SIZE / 2],
+            prev_weighted_magnitudes: vec![0.0; BUFFER_SIZE / 2],
             rms_history: VecDeque::with_capacity(10),
+            sample_rate,
+            hop_size,
         }
     }
 
-    /// add new audio samples to the buffer and process if we have enough data
+    /// add new mono audio samples to the buffer and process if we have enough data
     fn add_samples(&mut self, samples: &[f32]) {
         // calculate rms for this chunk of samples for silence detection
         let rms = (samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32).sqrt();
@@ -76,16 +82,17 @@ impl AudioProcessor {
         // add new samples to the ring buffer
         for &sample in samples {
             self.sample_buffer.push_back(sample);
-
-            // keep buffer size manageable - remove old samples
-            if self.sample_buffer.len() > BUFFER_SIZE * 2 {
-                self.sample_buffer.pop_front();
-            }
         }
 
-        // process audio if we have enough samples for analysis
-        if self.sample_buffer.len() >= BUFFER_SIZE {
+        // process audio with a fixed hop if we have enough samples for analysis
+        while self.sample_buffer.len() >= BUFFER_SIZE {
             self.process_audio_window();
+            // advance by hop size
+            for _ in 0..self.hop_size {
+                if self.sample_buffer.pop_front().is_none() {
+                    break;
+                }
+            }
         }
 
         // print bpm once per second
@@ -105,13 +112,8 @@ impl AudioProcessor {
 
     /// process a window of audio samples for onset detection
     fn process_audio_window(&mut self) {
-        // extract the most recent buffer_size samples for analysis
-        let window: Vec<f32> = self
-            .sample_buffer
-            .iter()
-            .skip(self.sample_buffer.len().saturating_sub(BUFFER_SIZE))
-            .copied()
-            .collect();
+        // extract the first BUFFER_SIZE samples for analysis
+        let window: Vec<f32> = self.sample_buffer.iter().take(BUFFER_SIZE).copied().collect();
 
         if window.len() < BUFFER_SIZE {
             return;
@@ -133,9 +135,8 @@ impl AudioProcessor {
         }
     }
 
-    /// calculate onset strength using frequency-weighted spectral flux method
-    /// this measures the change in spectral energy between consecutive frames,
-    /// with emphasis on low frequencies where beat information is most reliable
+    /// calculate onset strength using low-frequency-weighted spectral flux
+    /// this measures the change in spectral energy between consecutive frames
     fn calculate_onset_strength(&mut self, window: &[f32]) -> f32 {
         // apply hanning window to reduce spectral leakage
         let windowed: Vec<f32> = window
@@ -159,49 +160,39 @@ impl AudioProcessor {
         let fft = planner.plan_fft_forward(BUFFER_SIZE);
         fft.process(&mut fft_input);
 
-        // calculate magnitude spectrum - focus on lower frequencies for beat detection
-        let freq_bins_to_use = ((BUFFER_SIZE / 2) as f32 * HIGH_FREQ_CUTOFF) as usize;
+        // calculate magnitude spectrum (positive frequencies only)
         let magnitudes: Vec<f32> = fft_input
             .iter()
-            .take(freq_bins_to_use) // only use lower frequencies
+            .take(BUFFER_SIZE / 2)
             .map(|complex| complex.norm())
             .collect();
 
-        // calculate frequency-weighted spectral flux
-        // give more weight to low frequencies (bass/kick drums) and less to high frequencies
-        let weighted_spectral_flux: f32 = magnitudes
+        // emphasize low frequencies to stabilize beat-related onsets
+        let bin_hz = self.sample_rate as f32 / BUFFER_SIZE as f32;
+        let fc = 300.0_f32; // emphasis corner frequency (~kick/bass region)
+        let weighted: Vec<f32> = magnitudes
             .iter()
-            .zip(self.prev_magnitudes.iter())
             .enumerate()
-            .map(|(bin, (&current, &previous))| {
-                let flux = (current - previous).max(0.0); // only positive changes
-                
-                // create frequency weighting: boost low frequencies, reduce high frequencies
-                let freq_ratio = bin as f32 / magnitudes.len() as f32;
-                let weight = if freq_ratio < 0.2 {
-                    // boost bass frequencies (0-20% of spectrum)
-                    LOW_FREQ_WEIGHT
-                } else if freq_ratio < 0.5 {
-                    // normal weight for mid frequencies (20-50% of spectrum)
-                    1.0
-                } else {
-                    // reduce weight for higher frequencies (50%+ of spectrum)
-                    0.5
-                };
-                
-                flux * weight
+            .map(|(k, &m)| {
+                let f = k as f32 * bin_hz;
+                let w = 1.0 / (1.0 + (f / fc).powi(2));
+                m * w
             })
+            .collect();
+
+        // spectral flux (positive differences only) on weighted magnitudes
+        let spectral_flux: f32 = weighted
+            .iter()
+            .zip(self.prev_weighted_magnitudes.iter())
+            .map(|(&current, &previous)| (current - previous).max(0.0))
             .sum();
 
-        // update previous magnitudes for next frame (resize if needed)
-        if self.prev_magnitudes.len() != magnitudes.len() {
-            self.prev_magnitudes.resize(magnitudes.len(), 0.0);
-        }
-        self.prev_magnitudes.copy_from_slice(&magnitudes);
+        // update previous weighted magnitudes for next frame
+        self
+            .prev_weighted_magnitudes
+            .copy_from_slice(&weighted);
 
-        // return weighted spectral flux as onset strength
-        // removed spectral centroid as it was adding noise from high frequencies
-        weighted_spectral_flux
+        spectral_flux
     }
 
     /// calculate bpm from the history of onset strength values
@@ -220,11 +211,10 @@ impl AudioProcessor {
         let mut max_peak = 0.0;
         let mut peak_lag = 1;
 
-        // search for peaks in a reasonable bpm range (60-180 bpm)
-        // each onset strength value represents hop_size samples at sample_rate
-        let samples_per_onset = HOP_SIZE as f32;
-        let min_lag = ((60.0 / 180.0) * SAMPLE_RATE as f32 / samples_per_onset) as usize; // 180 bpm
-        let max_lag = ((60.0 / 60.0) * SAMPLE_RATE as f32 / samples_per_onset) as usize; // 60 bpm
+        // search for peaks in preferred bpm range, translated to lags
+        let hop_seconds = self.hop_size as f32 / self.sample_rate as f32;
+        let min_lag = (60.0 / BPM_MAX / hop_seconds).round().max(1.0) as usize;
+        let max_lag = (60.0 / BPM_MIN / hop_seconds).round() as usize;
 
         for lag in min_lag..max_lag.min(autocorr.len()) {
             if autocorr[lag] > max_peak {
@@ -234,27 +224,53 @@ impl AudioProcessor {
         }
 
         // convert lag back to bpm
-        // bpm = 60 * sample_rate / (lag * samples_per_onset)
+        // bpm = 60 / (lag * hop_seconds)
         let raw_bpm = if peak_lag > 0 {
-            60.0 * SAMPLE_RATE as f32 / (peak_lag as f32 * samples_per_onset)
+            60.0 / (peak_lag as f32 * hop_seconds)
         } else {
             return self.current_bpm; // keep previous bpm if no peak found
         };
 
-        // add to bpm history for smoothing
-        self.bpm_history.push_back(raw_bpm);
+        // fold to preferred band by ×2/÷2
+        let mut folded = raw_bpm;
+        while folded < BPM_MIN {
+            folded *= 2.0;
+        }
+        while folded > BPM_MAX {
+            folded /= 2.0;
+        }
+
+        // add to bpm history for median smoothing
+        self.bpm_history.push_back(folded);
         if self.bpm_history.len() > BPM_SMOOTHING_WINDOW {
             self.bpm_history.pop_front();
         }
 
-        // return smoothed bpm (median filter to reduce outliers)
-        if self.bpm_history.len() >= 3 {
+        // median filter to reduce outliers
+        let median = if self.bpm_history.len() >= 3 {
             let mut sorted_bpm: Vec<f32> = self.bpm_history.iter().copied().collect();
             sorted_bpm.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            sorted_bpm[sorted_bpm.len() / 2] // median
+            sorted_bpm[sorted_bpm.len() / 2]
         } else {
-            raw_bpm
+            folded
+        };
+
+        // apply EMA on top of median for stability
+        let mut ema = if self.current_bpm > 0.0 {
+            BPM_EMA_ALPHA * median + (1.0 - BPM_EMA_ALPHA) * self.current_bpm
+        } else {
+            median
+        };
+
+        // apply slew rate limiting per update
+        if self.current_bpm > 0.0 {
+            let delta = ema - self.current_bpm;
+            if delta.abs() > BPM_MAX_STEP_PER_UPDATE {
+                ema = self.current_bpm + delta.signum() * BPM_MAX_STEP_PER_UPDATE;
+            }
         }
+
+        ema
     }
 
     /// calculate autocorrelation of the input signal
@@ -364,15 +380,18 @@ fn run_input_mode(device_index: Option<usize>) -> Result<()> {
         supported_config.channels()
     );
 
-    // create stream configuration
+    // create stream configuration using the supported device config
     let config = StreamConfig {
-        channels: CHANNELS,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
+        channels: supported_config.channels(),
+        sample_rate: supported_config.sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     };
 
-    // create shared processor state
-    let processor = Arc::new(Mutex::new(AudioProcessor::new()));
+    // create shared processor state with actual sample rate and hop size
+    let processor = Arc::new(Mutex::new(AudioProcessor::new(
+        config.sample_rate.0,
+        HOP_SIZE,
+    )));
 
     // build input stream with callback for processing audio data
     let stream = build_input_stream(&device, &config, &supported_config, processor.clone())?;
@@ -395,14 +414,21 @@ fn build_input_stream(
     supported_config: &cpal::SupportedStreamConfig,
     processor: Arc<Mutex<AudioProcessor>>,
 ) -> Result<Stream> {
+    let num_channels = config.channels as usize;
     let stream = match supported_config.sample_format() {
         SampleFormat::F32 => {
             let processor_clone = processor.clone();
             device.build_input_stream(
                 config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    // downmix interleaved frames to mono by averaging channels
+                    let mut mono: Vec<f32> = Vec::with_capacity(data.len() / num_channels);
+                    for frame in data.chunks_exact(num_channels) {
+                        let sum: f32 = frame.iter().copied().sum();
+                        mono.push(sum / num_channels as f32);
+                    }
                     if let Ok(mut proc) = processor_clone.lock() {
-                        proc.add_samples(data);
+                        proc.add_samples(&mono);
                     }
                 },
                 |err| error!("audio stream error: {}", err),
@@ -414,14 +440,15 @@ fn build_input_stream(
             device.build_input_stream(
                 config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    // convert i16 samples to f32
-                    let float_data: Vec<f32> = data
-                        .iter()
-                        .map(|&sample| sample as f32 / i16::MAX as f32)
-                        .collect();
-
+                    // convert interleaved i16 frames to mono f32
+                    let mut mono: Vec<f32> = Vec::with_capacity(data.len() / num_channels);
+                    for frame in data.chunks_exact(num_channels) {
+                        let sum: i32 = frame.iter().map(|&s| s as i32).sum();
+                        let avg = (sum as f32 / num_channels as f32) / i16::MAX as f32;
+                        mono.push(avg);
+                    }
                     if let Ok(mut proc) = processor_clone.lock() {
-                        proc.add_samples(&float_data);
+                        proc.add_samples(&mono);
                     }
                 },
                 |err| error!("audio stream error: {}", err),
@@ -433,16 +460,17 @@ fn build_input_stream(
             device.build_input_stream(
                 config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    // convert u16 samples to f32
-                    let float_data: Vec<f32> = data
-                        .iter()
-                        .map(|&sample| {
-                            (sample as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
-                        })
-                        .collect();
-
+                    // convert interleaved u16 frames to mono f32 in [-1,1]
+                    let mut mono: Vec<f32> = Vec::with_capacity(data.len() / num_channels);
+                    for frame in data.chunks_exact(num_channels) {
+                        let sum: u32 = frame.iter().map(|&s| s as u32).sum();
+                        let avg_u16 = (sum / num_channels as u32) as f32;
+                        let centered = avg_u16 - (u16::MAX as f32 / 2.0);
+                        let norm = centered / (u16::MAX as f32 / 2.0);
+                        mono.push(norm);
+                    }
                     if let Ok(mut proc) = processor_clone.lock() {
-                        proc.add_samples(&float_data);
+                        proc.add_samples(&mono);
                     }
                 },
                 |err| error!("audio stream error: {}", err),

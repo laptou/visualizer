@@ -1,0 +1,6 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+- assume that the reader of the code doesn't know anything about signal processing or audio programming and is bad at math. make the code especially well-documented and easy to read to compensate.

@@ -1,0 +1,9 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+- write comments in lowercase and be succinct
+- write error messages and logging messages in lowercase
+- run outputs through `tracing`
+- run errors through `anyhow`
