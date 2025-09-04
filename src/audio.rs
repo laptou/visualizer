@@ -2,8 +2,8 @@ use crate::shared::SharedState;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
-use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -116,7 +116,9 @@ impl AudioProcessor {
             .take(BUFFER_SIZE)
             .copied()
             .collect();
-        if window.len() < BUFFER_SIZE { return; }
+        if window.len() < BUFFER_SIZE {
+            return;
+        }
 
         let onset_strength = self.calculate_onset_strength(&window);
         let prev_last = self.onset_history.back().copied().unwrap_or(0.0);
@@ -147,12 +149,15 @@ impl AudioProcessor {
             .iter()
             .enumerate()
             .map(|(i, &sample)| {
-                let hann_coeff = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (BUFFER_SIZE - 1) as f32).cos());
+                let hann_coeff = 0.5
+                    * (1.0
+                        - (2.0 * std::f32::consts::PI * i as f32 / (BUFFER_SIZE - 1) as f32).cos());
                 sample * hann_coeff
             })
             .collect();
 
-        let mut fft_input: Vec<Complex<f32>> = windowed.iter().map(|&x| Complex::new(x, 0.0)).collect();
+        let mut fft_input: Vec<Complex<f32>> =
+            windowed.iter().map(|&x| Complex::new(x, 0.0)).collect();
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(BUFFER_SIZE);
         fft.process(&mut fft_input);
@@ -171,7 +176,8 @@ impl AudioProcessor {
                 let f = k as f32 * bin_hz + FREQ_EPS;
                 let low_w = 1.0 / (1.0 + (f / LOW_EMPH_FC).powi(2));
                 let high_ratio = (f / HIGH_ALLOW_FC).max(0.0);
-                let high_w = (HIGH_ALLOW_GAIN * high_ratio / (1.0 + high_ratio)).clamp(0.0, HIGH_ALLOW_GAIN);
+                let high_w =
+                    (HIGH_ALLOW_GAIN * high_ratio / (1.0 + high_ratio)).clamp(0.0, HIGH_ALLOW_GAIN);
                 let w = (low_w + high_w).clamp(0.0, 1.0);
                 m * w
             })
@@ -187,7 +193,9 @@ impl AudioProcessor {
     }
 
     fn calculate_bpm(&mut self) -> f32 {
-        if self.onset_history.len() < 20 { return self.current_bpm; }
+        if self.onset_history.len() < 20 {
+            return self.current_bpm;
+        }
         let onset_data: Vec<f32> = self.onset_history.iter().copied().collect();
         let autocorr = self.autocorrelation(&onset_data);
 
@@ -199,7 +207,10 @@ impl AudioProcessor {
         let max_lag = (60.0 / BPM_MIN / hop_seconds).round() as usize;
         let search_end = max_lag.min(autocorr.len());
         let search_start = min_lag.min(search_end);
-        trace!("diag: bpm search lags={}..{}, hop_seconds={:.6}", search_start, search_end, hop_seconds);
+        trace!(
+            "diag: bpm search lags={}..{}, hop_seconds={:.6}",
+            search_start, search_end, hop_seconds
+        );
 
         for lag in search_start..search_end {
             if autocorr[lag] > max_peak {
@@ -207,12 +218,18 @@ impl AudioProcessor {
                 peak_lag = lag;
             }
         }
-        if max_peak == 0.0 || peak_lag == 0 { return self.current_bpm; }
+        if max_peak == 0.0 || peak_lag == 0 {
+            return self.current_bpm;
+        }
 
         let raw_bpm = 60.0 / (peak_lag as f32 * hop_seconds);
         let mut folded = raw_bpm;
-        while folded < BPM_MIN { folded *= 2.0; }
-        while folded > BPM_MAX { folded /= 2.0; }
+        while folded < BPM_MIN {
+            folded *= 2.0;
+        }
+        while folded > BPM_MAX {
+            folded /= 2.0;
+        }
 
         let end = max_lag.min(autocorr.len());
         let start = min_lag.min(end);
@@ -220,18 +237,32 @@ impl AudioProcessor {
             let mut slice: Vec<f32> = autocorr[start..end].to_vec();
             slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
             slice[slice.len() / 2]
-        } else { 0.0 };
-        let confidence_ratio = if baseline_median > 0.0 { max_peak / baseline_median } else { 0.0 };
+        } else {
+            0.0
+        };
+        let confidence_ratio = if baseline_median > 0.0 {
+            max_peak / baseline_median
+        } else {
+            0.0
+        };
 
         if confidence_ratio >= BPM_MIN_CONFIDENCE_RATIO {
             self.bpm_history.push_back(folded);
-            if self.bpm_history.len() > BPM_SMOOTHING_WINDOW { self.bpm_history.pop_front(); }
+            if self.bpm_history.len() > BPM_SMOOTHING_WINDOW {
+                self.bpm_history.pop_front();
+            }
             let median = if self.bpm_history.len() >= 3 {
                 let mut sorted_bpm: Vec<f32> = self.bpm_history.iter().copied().collect();
                 sorted_bpm.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 sorted_bpm[sorted_bpm.len() / 2]
-            } else { folded };
-            let ema = if self.current_bpm > 0.0 { BPM_EMA_ALPHA * median + (1.0 - BPM_EMA_ALPHA) * self.current_bpm } else { median };
+            } else {
+                folded
+            };
+            let ema = if self.current_bpm > 0.0 {
+                BPM_EMA_ALPHA * median + (1.0 - BPM_EMA_ALPHA) * self.current_bpm
+            } else {
+                median
+            };
             ema
         } else {
             self.current_bpm
@@ -261,11 +292,19 @@ pub fn list_input_devices() -> Result<()> {
     let devices = host.input_devices()?;
     tracing::info!("available input devices:");
     for (index, device) in devices.enumerate() {
-        let device_name = device.name().unwrap_or_else(|_| "unknown device".to_string());
+        let device_name = device
+            .name()
+            .unwrap_or_else(|_| "unknown device".to_string());
         match device.supported_input_configs() {
             Ok(mut configs) => {
                 if let Some(config) = configs.next() {
-                    tracing::info!("  {}: {} ({}hz, {} channels)", index, device_name, config.max_sample_rate().0, config.channels());
+                    tracing::info!(
+                        "  {}: {} ({}hz, {} channels)",
+                        index,
+                        device_name,
+                        config.max_sample_rate().0,
+                        config.channels()
+                    );
                 } else {
                     tracing::info!("  {}: {} (no supported configs)", index, device_name);
                 }
@@ -284,8 +323,14 @@ pub fn list_device_configs(device_index: usize) -> Result<()> {
         .into_iter()
         .nth(device_index)
         .ok_or_else(|| anyhow::anyhow!("input device index {} not found", device_index))?;
-    let device_name = device.name().unwrap_or_else(|_| "unknown device".to_string());
-    tracing::info!("available configs for device {}: {}", device_index, device_name);
+    let device_name = device
+        .name()
+        .unwrap_or_else(|_| "unknown device".to_string());
+    tracing::info!(
+        "available configs for device {}: {}",
+        device_index,
+        device_name
+    );
     match device.supported_input_configs() {
         Ok(configs) => {
             for (config_index, config_range) in configs.enumerate() {
@@ -298,19 +343,41 @@ pub fn list_device_configs(device_index: usize) -> Result<()> {
                     cpal::SupportedBufferSize::Unknown => "unknown".to_string(),
                 };
                 if min_rate == max_rate {
-                    tracing::info!("  {}: {}hz, {} channels, {:?}, buffer: {}", config_index, min_rate, channels, sample_format, buffer_size);
+                    tracing::info!(
+                        "  {}: {}hz, {} channels, {:?}, buffer: {}",
+                        config_index,
+                        min_rate,
+                        channels,
+                        sample_format,
+                        buffer_size
+                    );
                 } else {
-                    tracing::info!("  {}: {}-{}hz, {} channels, {:?}, buffer: {}", config_index, min_rate, max_rate, channels, sample_format, buffer_size);
+                    tracing::info!(
+                        "  {}: {}-{}hz, {} channels, {:?}, buffer: {}",
+                        config_index,
+                        min_rate,
+                        max_rate,
+                        channels,
+                        sample_format,
+                        buffer_size
+                    );
                 }
             }
         }
         Err(e) => return Err(anyhow::anyhow!("failed to get supported configs: {}", e)),
     }
-    tracing::info!("\nusage: audio-visualizer --device {} --config <index>", device_index);
+    tracing::info!(
+        "\nusage: audio-visualizer --device {} --config <index>",
+        device_index
+    );
     Ok(())
 }
 
-pub fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>, shared: Arc<Mutex<SharedState>>) -> Result<()> {
+pub fn run_input_mode(
+    device_index: Option<usize>,
+    config_index: Option<usize>,
+    shared: Arc<Mutex<SharedState>>,
+) -> Result<()> {
     info!("starting real-time onset detection and bpm analysis...");
     let host = cpal::default_host();
     let device = if let Some(index) = device_index {
@@ -320,7 +387,8 @@ pub fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>, 
             .nth(index)
             .ok_or_else(|| anyhow::anyhow!("input device index {} not found", index))?
     } else {
-        host.default_input_device().ok_or_else(|| anyhow::anyhow!("no default input device available"))?
+        host.default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("no default input device available"))?
     };
     info!("using input device: {}", device.name()?);
 
@@ -338,7 +406,11 @@ pub fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>, 
             .clone()
             .with_max_sample_rate()
     };
-    let config_msg = if let Some(idx) = config_index { format!("using config {}: ", idx) } else { "using default config: ".to_string() };
+    let config_msg = if let Some(idx) = config_index {
+        format!("using config {}: ", idx)
+    } else {
+        "using default config: ".to_string()
+    };
     info!(
         "{}sample rate: {}, channels: {}, format: {:?}",
         config_msg,
@@ -347,14 +419,24 @@ pub fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>, 
         supported_config.sample_format()
     );
 
-    let config = StreamConfig { channels: supported_config.channels(), sample_rate: supported_config.sample_rate(), buffer_size: cpal::BufferSize::Default };
+    let config = StreamConfig {
+        channels: supported_config.channels(),
+        sample_rate: supported_config.sample_rate(),
+        buffer_size: cpal::BufferSize::Default,
+    };
 
-    let processor = Arc::new(Mutex::new(AudioProcessor::new(config.sample_rate.0, HOP_SIZE, shared.clone())));
+    let processor = Arc::new(Mutex::new(AudioProcessor::new(
+        config.sample_rate.0,
+        HOP_SIZE,
+        shared.clone(),
+    )));
     let stream = build_input_stream(&device, &config, &supported_config, processor.clone())?;
     stream.play()?;
     info!("audio stream started. listening for audio input...");
     info!("press ctrl+c to stop.");
-    loop { thread::sleep(Duration::from_millis(100)); }
+    loop {
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn build_input_stream(
@@ -375,7 +457,9 @@ fn build_input_stream(
                         let sum: f32 = frame.iter().copied().sum();
                         mono.push(sum / num_channels as f32);
                     }
-                    if let Ok(mut proc) = processor_clone.lock() { proc.add_samples(&mono); }
+                    if let Ok(mut proc) = processor_clone.lock() {
+                        proc.add_samples(&mono);
+                    }
                 },
                 |err| error!("audio stream error: {}", err),
                 None,
@@ -392,7 +476,9 @@ fn build_input_stream(
                         let avg = (sum as f32 / num_channels as f32) / i16::MAX as f32;
                         mono.push(avg);
                     }
-                    if let Ok(mut proc) = processor_clone.lock() { proc.add_samples(&mono); }
+                    if let Ok(mut proc) = processor_clone.lock() {
+                        proc.add_samples(&mono);
+                    }
                 },
                 |err| error!("audio stream error: {}", err),
                 None,
@@ -411,15 +497,20 @@ fn build_input_stream(
                         let norm = centered / (u16::MAX as f32 / 2.0);
                         mono.push(norm);
                     }
-                    if let Ok(mut proc) = processor_clone.lock() { proc.add_samples(&mono); }
+                    if let Ok(mut proc) = processor_clone.lock() {
+                        proc.add_samples(&mono);
+                    }
                 },
                 |err| error!("audio stream error: {}", err),
                 None,
             )?
         }
-        sample_format => return Err(anyhow::anyhow!("unsupported sample format: {}", sample_format)),
+        sample_format => {
+            return Err(anyhow::anyhow!(
+                "unsupported sample format: {}",
+                sample_format
+            ));
+        }
     };
     Ok(stream)
 }
-
-

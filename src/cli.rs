@@ -21,5 +21,3 @@ pub struct Cli {
     #[arg(long)]
     pub list_configs: bool,
 }
-
-

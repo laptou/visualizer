@@ -33,5 +33,3 @@ impl SharedState {
         self.last_update = Instant::now();
     }
 }
-
-

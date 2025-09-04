@@ -1,15 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-
-
-mod shared;
-mod cli;
 mod audio;
-mod ui;
+mod cli;
 mod gfx;
+mod shared;
+mod ui;
 
 fn main() -> Result<()> {
     // initialize tracing subscriber for logging
@@ -36,13 +34,11 @@ fn main() -> Result<()> {
     // spawn audio thread
     let audio_shared = shared.clone();
     let cli_copy = cli.clone();
-    thread::Builder::new()
-        .name("audio".into())
-        .spawn(move || {
-            if let Err(e) = audio::run_input_mode(cli_copy.device, cli_copy.config, audio_shared) {
-                tracing::error!("audio thread error: {}", e);
-            }
-        })?;
+    thread::Builder::new().name("audio".into()).spawn(move || {
+        if let Err(e) = audio::run_input_mode(cli_copy.device, cli_copy.config, audio_shared) {
+            tracing::error!("audio thread error: {}", e);
+        }
+    })?;
 
     // run ui on main thread (wgpu/winit prefer main thread on macos)
     pollster::block_on(ui::run_ui(shared))?;
