@@ -9,6 +9,7 @@ mod shared;
 mod cli;
 mod audio;
 mod ui;
+mod gfx;
 
 fn main() -> Result<()> {
     // initialize tracing subscriber for logging

@@ -6,6 +6,8 @@ use tracing::{error, info};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
+use crate::gfx::Immediate2D;
+use crate::gfx::Color;
 
 /// simple wgpu surface renderer that clears the screen with a color each frame
 /// overview: we derive a beat phase from bpm and wall time, and map that to a
@@ -70,9 +72,16 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
 
     let mut last_title_update = Instant::now();
 
+    // immediate 2d renderer
+    let device_arc = Arc::new(device);
+    let queue_arc = Arc::new(queue);
+    let mut im2d = Immediate2D::new(&device_arc, &queue_arc, config.format, config.width, config.height)?;
+
     info!("ui started");
 
     let window_for_loop = window.clone();
+    let device_for_loop = device_arc.clone();
+    let queue_for_loop = queue_arc.clone();
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
@@ -82,7 +91,8 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 if new_size.width > 0 && new_size.height > 0 {
                     config.width = new_size.width;
                     config.height = new_size.height;
-                    surface.configure(&device, &config);
+                    surface.configure(&device_for_loop, &config);
+                    im2d.resize(config.format, config.width, config.height);
                 }
             }
             Event::AboutToWait => {
@@ -127,12 +137,12 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     Ok(f) => f,
                     Err(e) => {
                         error!("surface error: {}", e);
-                        surface.configure(&device, &config);
+                        surface.configure(&device_for_loop, &config);
                         return;
                     }
                 };
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+                let mut encoder = device_for_loop.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
                 {
                     let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("clear pass"),
@@ -149,7 +159,31 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         timestamp_writes: None,
                     });
                 }
-                queue.submit(std::iter::once(encoder.finish()));
+
+                // build immediate ui for this frame
+                im2d.begin_frame();
+                let w = config.width as f32;
+                let h = config.height as f32;
+                // animated rectangle based on beat phase
+                let rect_w = (w * 0.2) * (0.5 + 0.5 * flash);
+                let rect_h = 40.0;
+                let x = (w - rect_w) * phase;
+                let y = h * 0.1;
+                let _ = im2d.rect(x, y, rect_w, rect_h, Color::rgba(0.2, 0.8, 0.6, 1.0));
+                // a simple polygon bar responding to rms
+                let bar_h = (avg_rms * 600.0).clamp(2.0, h * 0.5);
+                let poly = vec![[w*0.1, h*0.9], [w*0.1 + 10.0, h*0.9], [w*0.1 + 10.0, h*0.9 - bar_h], [w*0.1, h*0.9 - bar_h]];
+                let _ = im2d.polygon(&poly, Color::rgba(0.9, 0.9, 0.2, 1.0));
+                // text showing bpm
+                if bpm > 0.0 {
+                    im2d.text(w*0.05, h*0.08, &format!("{:.1} bpm", bpm), 28.0, Color::rgba(1.0, 1.0, 1.0, 1.0));
+                } else {
+                    im2d.text(w*0.05, h*0.08, "analyzing...", 28.0, Color::rgba(1.0, 1.0, 1.0, 1.0));
+                }
+
+                // render accumulated draws
+                im2d.render(&mut encoder, &view);
+                queue_for_loop.submit(std::iter::once(encoder.finish()));
                 frame.present();
                 window_for_loop.request_redraw();
             }
