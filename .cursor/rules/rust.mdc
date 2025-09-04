@@ -1,0 +1,7 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+- When checking if the project compiles, prefer `cargo check` to `cargo build`.
+- When adding new dependencies, prefer using `cargo add` to directly modifying `Cargo.toml` to prevent adding outdated dependency versions.

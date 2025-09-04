@@ -1,13 +1,13 @@
+use crate::gfx::Color;
+use crate::gfx::Immediate2D;
 use crate::shared::SharedState;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
-use crate::gfx::Immediate2D;
-use crate::gfx::Color;
 
 /// simple wgpu surface renderer that clears the screen with a color each frame
 /// overview: we derive a beat phase from bpm and wall time, and map that to a
@@ -21,11 +21,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
     let window = Arc::new(window);
 
     // instance + surface
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
-        dx12_shader_compiler: Default::default(),
+        backend_options: Default::default(),
         flags: wgpu::InstanceFlags::default(),
-        gles_minor_version: wgpu::Gles3MinorVersion::Automatic,
     });
     let surface = instance.create_surface(window.as_ref())?;
 
@@ -37,16 +36,16 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             force_fallback_adapter: false,
         })
         .await
-        .ok_or_else(|| anyhow::anyhow!("no wgpu adapter found"))?;
+        .context("no wgpu adapter found")?;
+
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-            },
-            None,
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                .using_resolution(adapter.limits()),
+            ..Default::default()
+        })
         .await?;
 
     // configure surface
@@ -75,7 +74,13 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
     // immediate 2d renderer
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(queue);
-    let mut im2d = Immediate2D::new(&device_arc, &queue_arc, config.format, config.width, config.height)?;
+    let mut im2d = Immediate2D::new(
+        &device_arc,
+        &queue_arc,
+        config.format,
+        config.width,
+        config.height,
+    )?;
 
     info!("ui started");
 
@@ -84,10 +89,16 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
     let queue_for_loop = queue_arc.clone();
     event_loop.run(move |event, elwt| {
         match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
                 elwt.exit();
             }
-            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(new_size),
+                ..
+            } => {
                 if new_size.width > 0 && new_size.height > 0 {
                     config.width = new_size.width;
                     config.height = new_size.height;
@@ -117,8 +128,14 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 // red flash envelope: quick spike at beat, decay over the rest of the cycle
                 let flash = if beats_per_second > 0.0 {
                     let attack = 0.1; // first 10% of cycle bright
-                    if phase < attack { 1.0 } else { ((1.0 - (phase - attack) / (1.0 - attack))).max(0.0) }
-                } else { 0.05 };
+                    if phase < attack {
+                        1.0
+                    } else {
+                        (1.0 - (phase - attack) / (1.0 - attack)).max(0.0)
+                    }
+                } else {
+                    0.05
+                };
 
                 // dampen if essentially silent
                 let silence = if avg_rms < 0.001 { 0.2 } else { 1.0 };
@@ -127,8 +144,11 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 let b = 0.06f32;
 
                 if last_title_update.elapsed() >= Duration::from_millis(250) {
-                    if bpm > 0.0 { window_for_loop.set_title(&format!("visualizer: {:.1} bpm", bpm)); }
-                    else { window_for_loop.set_title("visualizer: analyzing..."); }
+                    if bpm > 0.0 {
+                        window_for_loop.set_title(&format!("visualizer: {:.1} bpm", bpm));
+                    } else {
+                        window_for_loop.set_title("visualizer: analyzing...");
+                    }
                     last_title_update = Instant::now();
                 }
 
@@ -141,8 +161,13 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         return;
                     }
                 };
-                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder = device_for_loop.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let mut encoder =
+                    device_for_loop.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("encoder"),
+                    });
                 {
                     let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("clear pass"),
@@ -150,7 +175,12 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                             view: &view,
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: 1.0 }),
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: r as f64,
+                                    g: g as f64,
+                                    b: b as f64,
+                                    a: 1.0,
+                                }),
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
@@ -172,13 +202,30 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 let _ = im2d.rect(x, y, rect_w, rect_h, Color::rgba(0.2, 0.8, 0.6, 1.0));
                 // a simple polygon bar responding to rms
                 let bar_h = (avg_rms * 600.0).clamp(2.0, h * 0.5);
-                let poly = vec![[w*0.1, h*0.9], [w*0.1 + 10.0, h*0.9], [w*0.1 + 10.0, h*0.9 - bar_h], [w*0.1, h*0.9 - bar_h]];
+                let poly = vec![
+                    [w * 0.1, h * 0.9],
+                    [w * 0.1 + 10.0, h * 0.9],
+                    [w * 0.1 + 10.0, h * 0.9 - bar_h],
+                    [w * 0.1, h * 0.9 - bar_h],
+                ];
                 let _ = im2d.polygon(&poly, Color::rgba(0.9, 0.9, 0.2, 1.0));
                 // text showing bpm
                 if bpm > 0.0 {
-                    im2d.text(w*0.05, h*0.08, &format!("{:.1} bpm", bpm), 28.0, Color::rgba(1.0, 1.0, 1.0, 1.0));
+                    im2d.text(
+                        w * 0.05,
+                        h * 0.08,
+                        &format!("{:.1} bpm", bpm),
+                        28.0,
+                        Color::rgba(1.0, 1.0, 1.0, 1.0),
+                    );
                 } else {
-                    im2d.text(w*0.05, h*0.08, "analyzing...", 28.0, Color::rgba(1.0, 1.0, 1.0, 1.0));
+                    im2d.text(
+                        w * 0.05,
+                        h * 0.08,
+                        "analyzing...",
+                        28.0,
+                        Color::rgba(1.0, 1.0, 1.0, 1.0),
+                    );
                 }
 
                 // render accumulated draws
@@ -192,5 +239,3 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
     })?;
     Ok(())
 }
-
-

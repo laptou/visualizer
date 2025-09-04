@@ -59,6 +59,7 @@
               cargo-deny
               cargo-edit
               cargo-watch
+              cargo-outdated
               rust-analyzer
             ];
 

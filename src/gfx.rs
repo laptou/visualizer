@@ -1,10 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use lyon_geom as geom;
 use lyon_path as path;
 use lyon_tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers};
 use std::sync::Arc;
-use wgpu::{BindGroup, BindGroupLayout, BufferAddress, Device, Queue, RenderPassColorAttachment, RenderPassDescriptor, TextureFormat, TextureView};
+use wgpu::{
+    BindGroup, BindGroupLayout, BufferAddress, Device, Queue, RenderPassColorAttachment,
+    RenderPassDescriptor, TextureFormat, TextureView,
+};
 
 /// rgba color in linear space (0..1)
 #[derive(Copy, Clone, Debug)]
@@ -16,8 +19,12 @@ pub struct Color {
 }
 
 impl Color {
-    pub fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self { Self { r, g, b, a } }
-    fn to_array(self) -> [f32; 4] { [self.r, self.g, self.b, self.a] }
+    pub fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+    fn to_array(self) -> [f32; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
 }
 
 #[repr(C)]
@@ -50,7 +57,13 @@ pub struct Immediate2D {
 }
 
 impl Immediate2D {
-    pub fn new(device: &Arc<Device>, queue: &Arc<Queue>, format: TextureFormat, width: u32, height: u32) -> Result<Self> {
+    pub fn new(
+        device: &Arc<Device>,
+        queue: &Arc<Queue>,
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         // create shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("immediate2d shader"),
@@ -58,19 +71,20 @@ impl Immediate2D {
         });
 
         // uniform for screen size
-        let screen_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("screen bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let screen_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("screen bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let screen_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screen uniform"),
             size: 8,
@@ -80,7 +94,10 @@ impl Immediate2D {
         let screen_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("screen bg"),
             layout: &screen_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: screen_uniform.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_uniform.as_entire_binding(),
+            }],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -93,31 +110,49 @@ impl Immediate2D {
             array_stride: std::mem::size_of::<GpuVertex>() as BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { shader_location: 0, offset: 0, format: wgpu::VertexFormat::Float32x2 },
-                wgpu::VertexAttribute { shader_location: 1, offset: 8, format: wgpu::VertexFormat::Float32x4 },
+                wgpu::VertexAttribute {
+                    shader_location: 0,
+                    offset: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    shader_location: 1,
+                    offset: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
             ],
         };
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("immediate2d pipeline"),
             layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[vertex_layout] },
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout],
+                compilation_options: Default::default(),
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
 
-        let mut this = Self {
+        let this = Self {
             device: device.clone(),
             queue: queue.clone(),
             surface_format: format,
@@ -136,7 +171,8 @@ impl Immediate2D {
 
     fn update_screen_uniform(&self) {
         let data = [self.width as f32, self.height as f32];
-        self.queue.write_buffer(&self.screen_uniform, 0, bytemuck::cast_slice(&data));
+        self.queue
+            .write_buffer(&self.screen_uniform, 0, bytemuck::cast_slice(&data));
     }
 
     pub fn resize(&mut self, format: TextureFormat, width: u32, height: u32) {
@@ -164,10 +200,14 @@ impl Immediate2D {
     }
 
     pub fn polygon(&mut self, points: &[[f32; 2]], color: Color) -> Result<()> {
-        if points.len() < 3 { return Err(anyhow!("polygon needs at least 3 points")); }
+        if points.len() < 3 {
+            return Err(anyhow!("polygon needs at least 3 points"));
+        }
         let mut builder = path::Path::builder();
         builder.begin(geom::point(points[0][0], points[0][1]));
-        for p in &points[1..] { builder.line_to(geom::point(p[0], p[1])); }
+        for p in &points[1..] {
+            builder.line_to(geom::point(p[0], p[1]));
+        }
         builder.end(true);
         let path = builder.build();
         self.tessellate_path(&path, color)
@@ -181,13 +221,18 @@ impl Immediate2D {
             &FillOptions::default(),
             &mut BuffersBuilder::new(&mut geometry, |v: FillVertex| {
                 let p = v.position();
-                GpuVertex { pos: [p.x, p.y], color: color.to_array() }
+                GpuVertex {
+                    pos: [p.x, p.y],
+                    color: color.to_array(),
+                }
             }),
-        ).map_err(|e| anyhow!("tessellation error: {:?}", e))?;
+        )
+        .map_err(|e| anyhow!("tessellation error: {:?}", e))?;
 
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&geometry.vertices);
-        self.indices.extend(geometry.indices.into_iter().map(|i| i + base));
+        self.indices
+            .extend(geometry.indices.into_iter().map(|i| i + base));
         Ok(())
     }
 
@@ -202,20 +247,31 @@ impl Immediate2D {
             let vsize = (self.vertices.len() * std::mem::size_of::<GpuVertex>()) as u64;
             let isize = (self.indices.len() * std::mem::size_of::<u32>()) as u64;
             let vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("im2d vbuf"), size: vsize, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+                label: Some("im2d vbuf"),
+                size: vsize,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
             let ibuf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("im2d ibuf"), size: isize, usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+                label: Some("im2d ibuf"),
+                size: isize,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
-            self.queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&self.vertices));
-            self.queue.write_buffer(&ibuf, 0, bytemuck::cast_slice(&self.indices));
+            self.queue
+                .write_buffer(&vbuf, 0, bytemuck::cast_slice(&self.vertices));
+            self.queue
+                .write_buffer(&ibuf, 0, bytemuck::cast_slice(&self.indices));
 
             let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("im2d shapes"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
@@ -261,5 +317,3 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 "#;
-
-
