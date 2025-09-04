@@ -656,7 +656,7 @@ impl DrawContext {
                             let mut b = buffer.borrow_with(&mut this.font_system);
                             b.set_size(None, None);
                             b.set_wrap(CtWrap::None);
-                            let mut attrs = CtAttrs::new().weight(opts.weight);
+                            let attrs = CtAttrs::new().weight(opts.weight);
                             // note: cosmic-text 0.14 `Attrs` doesn't expose a stable way to set
                             // family from a `String` without static lifetime requirements.
                             // we'll rely on the default font if a custom family is requested,
