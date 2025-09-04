@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,6 +20,13 @@ const BPM_EMA_ALPHA: f32 = 0.1; // additional EMA smoothing factor
 const BPM_MIN: f32 = 80.0; // preferred bpm lower bound for folding
 const BPM_MAX: f32 = 160.0; // preferred bpm upper bound for folding
 const BPM_MAX_STEP_PER_UPDATE: f32 = 5.0; // limit change per update
+const BPM_MIN_CONFIDENCE_RATIO: f32 = 1.8; // min peak/median ratio to accept bpm update
+
+// frequency weighting for onset detection
+const LOW_EMPH_FC: f32 = 300.0; // corner frequency for low boost
+const HIGH_ALLOW_FC: f32 = 4000.0; // corner frequency to allow highs (hi-hats/snares)
+const HIGH_ALLOW_GAIN: f32 = 0.3; // highs are allowed but with reduced weight vs lows
+const FREQ_EPS: f32 = 1e-3; // avoid div-by-zero in weighting math
 
 /// command-line interface for the audio visualizer
 #[derive(Parser)]
@@ -27,15 +36,15 @@ struct Cli {
     /// input device index (use --list-devices to see options)
     #[arg(short, long)]
     device: Option<usize>,
-    
+
     /// config index for the selected device (use --list-configs to see options)
     #[arg(short, long)]
     config: Option<usize>,
-    
+
     /// list available input devices and exit
     #[arg(long)]
     list_devices: bool,
-    
+
     /// list available configs for a device and exit (requires --device)
     #[arg(long)]
     list_configs: bool,
@@ -119,9 +128,17 @@ impl AudioProcessor {
     }
 
     /// process a window of audio samples for onset detection
+    /// overview: take a hop-sized frame, run an stft (hann + fft), weight
+    /// frequencies (lows prioritized, highs allowed, mids suppressed), compute
+    /// spectral flux, and update bpm via autocorr with confidence gating.
     fn process_audio_window(&mut self) {
         // extract the first BUFFER_SIZE samples for analysis
-        let window: Vec<f32> = self.sample_buffer.iter().take(BUFFER_SIZE).copied().collect();
+        let window: Vec<f32> = self
+            .sample_buffer
+            .iter()
+            .take(BUFFER_SIZE)
+            .copied()
+            .collect();
 
         if window.len() < BUFFER_SIZE {
             return;
@@ -143,8 +160,10 @@ impl AudioProcessor {
         }
     }
 
-    /// calculate onset strength using low-frequency-weighted spectral flux
-    /// this measures the change in spectral energy between consecutive frames
+    /// calculate onset strength using stft + spectral flux
+    /// overview: we compute an stft frame (hann window + fft), apply a frequency weighting
+    /// that prioritizes lows and allows highs while suppressing mids, then measure positive
+    /// spectral changes (spectral flux). this stabilizes beats when kicks pause but hats continue.
     fn calculate_onset_strength(&mut self, window: &[f32]) -> f32 {
         // apply hanning window to reduce spectral leakage
         let windowed: Vec<f32> = window
@@ -158,13 +177,11 @@ impl AudioProcessor {
             })
             .collect();
 
-        // compute fft to get frequency domain representation
-        let mut fft_input: Vec<rustfft::num_complex::Complex<f32>> = windowed
-            .iter()
-            .map(|&x| rustfft::num_complex::Complex::new(x, 0.0))
-            .collect();
+        // compute fft to get frequency domain representation (this is one stft frame)
+        let mut fft_input: Vec<Complex<f32>> =
+            windowed.iter().map(|&x| Complex::new(x, 0.0)).collect();
 
-        let mut planner = rustfft::FftPlanner::new();
+        let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(BUFFER_SIZE);
         fft.process(&mut fft_input);
 
@@ -175,15 +192,23 @@ impl AudioProcessor {
             .map(|complex| complex.norm())
             .collect();
 
-        // emphasize low frequencies to stabilize beat-related onsets
+        // frequency weighting: suppress mids, prioritize lows, allow highs with reduced gain
+        // low emphasis: 1 / (1 + (f/fc)^2)
+        // high allowance: gentle shelf that ramps up above HIGH_ALLOW_FC with capped gain
         let bin_hz = self.sample_rate as f32 / BUFFER_SIZE as f32;
-        let fc = 300.0_f32; // emphasis corner frequency (~kick/bass region)
         let weighted: Vec<f32> = magnitudes
             .iter()
             .enumerate()
             .map(|(k, &m)| {
-                let f = k as f32 * bin_hz;
-                let w = 1.0 / (1.0 + (f / fc).powi(2));
+                let f = k as f32 * bin_hz + FREQ_EPS;
+                // low emphasis (strong near kick region)
+                let low_w = 1.0 / (1.0 + (f / LOW_EMPH_FC).powi(2));
+                // high allowance: start allowing above HIGH_ALLOW_FC but keep under low priority
+                let high_ratio = (f / HIGH_ALLOW_FC).max(0.0);
+                let high_w =
+                    (HIGH_ALLOW_GAIN * high_ratio / (1.0 + high_ratio)).clamp(0.0, HIGH_ALLOW_GAIN);
+                // mid suppression emerges naturally since low_w decays and high_w is capped small
+                let w = (low_w + high_w).clamp(0.0, 1.0);
                 m * w
             })
             .collect();
@@ -196,9 +221,7 @@ impl AudioProcessor {
             .sum();
 
         // update previous weighted magnitudes for next frame
-        self
-            .prev_weighted_magnitudes
-            .copy_from_slice(&weighted);
+        self.prev_weighted_magnitudes.copy_from_slice(&weighted);
 
         spectral_flux
     }
@@ -224,11 +247,20 @@ impl AudioProcessor {
         let min_lag = (60.0 / BPM_MAX / hop_seconds).round().max(1.0) as usize;
         let max_lag = (60.0 / BPM_MIN / hop_seconds).round() as usize;
 
-        for lag in min_lag..max_lag.min(autocorr.len()) {
+        // guard the search bounds to avoid empty/invalid ranges early on
+        let search_end = max_lag.min(autocorr.len());
+        let search_start = min_lag.min(search_end);
+
+        for lag in search_start..search_end {
             if autocorr[lag] > max_peak {
                 max_peak = autocorr[lag];
                 peak_lag = lag;
             }
+        }
+
+        // if we couldn't find a valid peak yet, keep previous bpm
+        if max_peak == 0.0 || peak_lag == 0 {
+            return self.current_bpm;
         }
 
         // convert lag back to bpm
@@ -248,37 +280,66 @@ impl AudioProcessor {
             folded /= 2.0;
         }
 
-        // add to bpm history for median smoothing
-        self.bpm_history.push_back(folded);
-        if self.bpm_history.len() > BPM_SMOOTHING_WINDOW {
-            self.bpm_history.pop_front();
-        }
+        // compute confidence from autocorrelation: peak prominence vs local baseline
+        // we use median of the searched lag range as a robust baseline
+        let hop_seconds = self.hop_size as f32 / self.sample_rate as f32;
+        let min_lag = (60.0 / BPM_MAX / hop_seconds).round().max(1.0) as usize;
+        let max_lag = (60.0 / BPM_MIN / hop_seconds).round() as usize;
 
-        // median filter to reduce outliers
-        let median = if self.bpm_history.len() >= 3 {
-            let mut sorted_bpm: Vec<f32> = self.bpm_history.iter().copied().collect();
-            sorted_bpm.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            sorted_bpm[sorted_bpm.len() / 2]
+        let end = max_lag.min(autocorr.len());
+        let start = min_lag.min(end);
+
+        let baseline_median = if end > start + 2 {
+            let mut slice: Vec<f32> = autocorr[start..end].to_vec();
+            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            slice[slice.len() / 2]
         } else {
-            folded
+            0.0
         };
 
-        // apply EMA on top of median for stability
-        let mut ema = if self.current_bpm > 0.0 {
-            BPM_EMA_ALPHA * median + (1.0 - BPM_EMA_ALPHA) * self.current_bpm
+        let confidence_ratio = if baseline_median > 0.0 {
+            max_peak / baseline_median
         } else {
-            median
+            0.0
         };
 
-        // apply slew rate limiting per update
-        if self.current_bpm > 0.0 {
-            let delta = ema - self.current_bpm;
-            if delta.abs() > BPM_MAX_STEP_PER_UPDATE {
-                ema = self.current_bpm + delta.signum() * BPM_MAX_STEP_PER_UPDATE;
+        // only accept and smooth bpm when confidence is sufficient
+        if confidence_ratio >= BPM_MIN_CONFIDENCE_RATIO {
+            // add to bpm history for median smoothing
+            self.bpm_history.push_back(folded);
+            if self.bpm_history.len() > BPM_SMOOTHING_WINDOW {
+                self.bpm_history.pop_front();
             }
-        }
 
-        ema
+            // median filter to reduce outliers
+            let median = if self.bpm_history.len() >= 3 {
+                let mut sorted_bpm: Vec<f32> = self.bpm_history.iter().copied().collect();
+                sorted_bpm.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                sorted_bpm[sorted_bpm.len() / 2]
+            } else {
+                folded
+            };
+
+            // apply EMA on top of median for stability
+            let mut ema = if self.current_bpm > 0.0 {
+                BPM_EMA_ALPHA * median + (1.0 - BPM_EMA_ALPHA) * self.current_bpm
+            } else {
+                median
+            };
+
+            // apply slew rate limiting per update
+            if self.current_bpm > 0.0 {
+                let delta = ema - self.current_bpm;
+                if delta.abs() > BPM_MAX_STEP_PER_UPDATE {
+                    ema = self.current_bpm + delta.signum() * BPM_MAX_STEP_PER_UPDATE;
+                }
+            }
+
+            return ema;
+        } else {
+            // keep previous bpm if confidence is low
+            return self.current_bpm;
+        }
     }
 
     /// calculate autocorrelation of the input signal
@@ -306,14 +367,16 @@ impl AudioProcessor {
 fn main() -> Result<()> {
     // initialize tracing subscriber for logging
     tracing_subscriber::fmt::init();
-    
+
     let cli = Cli::parse();
 
     if cli.list_devices {
         list_input_devices()?;
     } else if cli.list_configs {
         if cli.device.is_none() {
-            return Err(anyhow::anyhow!("--list-configs requires --device to be specified"));
+            return Err(anyhow::anyhow!(
+                "--list-configs requires --device to be specified"
+            ));
         }
         list_device_configs(cli.device.unwrap())?;
     } else {
@@ -364,7 +427,7 @@ fn list_input_devices() -> Result<()> {
 fn list_device_configs(device_index: usize) -> Result<()> {
     let host = cpal::default_host();
     let devices: Vec<_> = host.input_devices()?.collect();
-    
+
     let device = devices
         .into_iter()
         .nth(device_index)
@@ -374,7 +437,10 @@ fn list_device_configs(device_index: usize) -> Result<()> {
         .name()
         .unwrap_or_else(|_| "Unknown Device".to_string());
 
-    info!("available configs for device {}: {}", device_index, device_name);
+    info!(
+        "available configs for device {}: {}",
+        device_index, device_name
+    );
 
     match device.supported_input_configs() {
         Ok(configs) => {
@@ -407,7 +473,10 @@ fn list_device_configs(device_index: usize) -> Result<()> {
         }
     }
 
-    info!("\nusage: audio-visualizer --device {} --config <index>", device_index);
+    info!(
+        "\nusage: audio-visualizer --device {} --config <index>",
+        device_index
+    );
     Ok(())
 }
 
@@ -433,7 +502,7 @@ fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>) -> R
 
     // get supported input configurations
     let supported_configs: Vec<_> = device.supported_input_configs()?.collect();
-    
+
     // select the specified config or use the first one with max sample rate as default
     let supported_config = if let Some(config_idx) = config_index {
         supported_configs
@@ -454,7 +523,7 @@ fn run_input_mode(device_index: Option<usize>, config_index: Option<usize>) -> R
     } else {
         "using default config: ".to_string()
     };
-    
+
     info!(
         "{}sample rate: {}, channels: {}, format: {:?}",
         config_msg,
@@ -561,10 +630,12 @@ fn build_input_stream(
             )?
         }
         sample_format => {
-            return Err(anyhow::anyhow!("unsupported sample format: {}", sample_format));
+            return Err(anyhow::anyhow!(
+                "unsupported sample format: {}",
+                sample_format
+            ));
         }
     };
 
     Ok(stream)
 }
-
