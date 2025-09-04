@@ -1,9 +1,9 @@
-use anyhow::{Result, anyhow, Context as AnyhowContext};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use glyph::cosmic_text::{
     Attrs as CtAttrs, Buffer as CtBuffer, Color as CtColor, FontSystem as CtFontSystem,
-    Metrics as CtMetrics, Shaping as CtShaping, SwashCache as CtSwashCache, Wrap as CtWrap,
-    Weight as CtWeight,
+    Metrics as CtMetrics, Shaping as CtShaping, SwashCache as CtSwashCache, Weight as CtWeight,
+    Wrap as CtWrap,
 };
 use glyph::{Cache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport};
 use glyphon as glyph;
@@ -103,11 +103,19 @@ pub enum DrawOp {
 
 /// horizontal alignment relative to the provided `(x, y)` anchor
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum TextHAlign { Left, Center, Right }
+pub enum TextHAlign {
+    Left,
+    Center,
+    Right,
+}
 
 /// vertical alignment relative to the provided `(x, y)` anchor
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum TextVAlign { Top, Middle, Baseline }
+pub enum TextVAlign {
+    Top,
+    Middle,
+    Baseline,
+}
 
 /// formatting options for text drawing; sensible defaults chosen
 #[derive(Clone, Debug)]
@@ -439,7 +447,13 @@ impl DrawContext {
             );
         }
         // keep glyphon viewport resolution in sync with current drawable size
-        self.viewport.update(&self.queue, glyph::Resolution { width: self.width, height: self.height });
+        self.viewport.update(
+            &self.queue,
+            glyph::Resolution {
+                width: self.width,
+                height: self.height,
+            },
+        );
         self.depth_view = create_depth_stencil_view(&self.device, self.width, self.height);
     }
 
@@ -470,13 +484,27 @@ impl DrawContext {
 
     pub fn text(&mut self, x: f32, y: f32, text: &str, px: f32, color: Color) {
         // backwards-compatible helper using defaults
-        self.text_with(x, y, text, TextOptions { px, color, ..Default::default() });
+        self.text_with(
+            x,
+            y,
+            text,
+            TextOptions {
+                px,
+                color,
+                ..Default::default()
+            },
+        );
     }
 
     /// draw text with formatting options
     pub fn text_with(&mut self, x: f32, y: f32, text: &str, opts: TextOptions) {
         // buffer a text draw; shaping happens during render
-        self.ops.push(DrawOp::Text { x, y, text: text.to_string(), opts });
+        self.ops.push(DrawOp::Text {
+            x,
+            y,
+            text: text.to_string(),
+            opts,
+        });
     }
 
     /// request clearing the color target when `render` starts
@@ -763,7 +791,12 @@ impl DrawContext {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: match self.clear_color {
-                        Some(c) => wgpu::LoadOp::Clear(wgpu::Color { r: c.r as f64, g: c.g as f64, b: c.b as f64, a: c.a as f64 }),
+                        Some(c) => wgpu::LoadOp::Clear(wgpu::Color {
+                            r: c.r as f64,
+                            g: c.g as f64,
+                            b: c.b as f64,
+                            a: c.a as f64,
+                        }),
                         None => wgpu::LoadOp::Load,
                     },
                     store: wgpu::StoreOp::Store,

@@ -5,8 +5,8 @@ pub mod audio;
 pub mod cli;
 pub mod gfx;
 // re-export for macro without making users depend on lyon directly
-pub use lyon_path as __vzr_lyon_path;
 pub use lyon_geom as __vzr_lyon_geom;
+pub use lyon_path as __vzr_lyon_path;
 /// macro to build lyon svg-style paths concisely
 /// usage:
 /// let p = svg_path! {
@@ -62,8 +62,6 @@ macro_rules! svg_path {
         _svg.build()
     }};
 }
+pub mod app;
 pub mod shared;
 pub mod ui;
-pub mod app;
-
-
