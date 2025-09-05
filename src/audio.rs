@@ -32,6 +32,9 @@ const HIGH_ALLOW_FC: f32 = 4000.0; // corner frequency to allow highs (hi-hats/s
 const HIGH_ALLOW_GAIN: f32 = 0.3; // highs are allowed but with reduced weight vs lows
 const FREQ_EPS: f32 = 1e-3; // avoid div-by-zero in weighting math
 
+// spectrogram display cap (we only visualize up to this frequency)
+const SPECTRO_MAX_HZ: f32 = 8000.0;
+
 /// shared state for real-time audio processing
 struct AudioProcessor {
     sample_buffer: VecDeque<f32>,
@@ -184,15 +187,17 @@ impl AudioProcessor {
                 }
             }
             s.push_spectrogram_slice(&tmp);
+            // compute a small baseline from recent history
+            let mut slice: Vec<f32> = self.onset_history.iter().copied().collect();
+            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = if !slice.is_empty() { slice[slice.len() / 2] } else { 1e-6 };
             // push normalized onset for graph (normalize by dynamic baseline)
-            let norm = {
-                // compute a small baseline from recent history
-                let mut slice: Vec<f32> = self.onset_history.iter().copied().collect();
-                slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let med = if !slice.is_empty() { slice[slice.len() / 2] } else { 1e-6 };
-                (onset_strength / med.max(1e-6)).min(4.0) / 4.0
-            };
+            let norm = f32::clamp(onset_strength / med.max(1e-6), 0.0, 4.0) / 4.0;
             s.push_onset(norm);
+            // derive low-frequency onset normalization using a fraction of median as baseline
+            let low_baseline = 0.5 * med.max(1e-6);
+            let norm_low = f32::clamp(lowband_flux / low_baseline, 0.0, 4.0) / 4.0;
+            s.push_low_onset(norm_low);
         }
 
         // detect kick using low-band flux with a simple median threshold
@@ -266,8 +271,15 @@ impl AudioProcessor {
             .sum();
 
         // build a spectrogram slice from weighted magnitudes with simple dynamic range mapping
+        // truncate to <= 8khz so we spend vertical resolution on lows/mids
+        let max_bin_inclusive = {
+            let max_bin = (SPECTRO_MAX_HZ / bin_hz).floor() as usize;
+            // clamp within computed spectrum size
+            std::cmp::min(max_bin, weighted.len().saturating_sub(1))
+        };
         let slice: Vec<f32> = weighted
             .iter()
+            .take(max_bin_inclusive + 1)
             .map(|&v| {
                 let v = v.max(0.0);
                 let v = (v / 50.0).min(1.0); // simple scale; tuned empirically

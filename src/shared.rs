@@ -29,6 +29,12 @@ pub struct SharedState {
     onset: Vec<f32>,
     /// version bump whenever a new onset value is pushed
     pub onset_version: u64,
+
+    /// rolling low-frequency onset intensity values (newest at the rightmost index)
+    low_onset_len: usize,
+    low_onset: Vec<f32>,
+    /// version bump whenever a new low onset value is pushed
+    pub low_onset_version: u64,
 }
 
 impl SharedState {
@@ -49,6 +55,9 @@ impl SharedState {
             onset_len: spectro_cols,
             onset: vec![0.0; spectro_cols],
             onset_version: 0,
+            low_onset_len: spectro_cols,
+            low_onset: vec![0.0; spectro_cols],
+            low_onset_version: 0,
         }
     }
 
@@ -100,13 +109,28 @@ impl SharedState {
         }
         // shift left
         self.onset.copy_within(1..self.onset_len, 0);
-        self.onset[self.onset_len - 1] = v.clamp(0.0, 1.0);
+        self.onset[self.onset_len - 1] = f32::clamp(v, 0.0, 1.0);
         self.onset_version = self.onset_version.wrapping_add(1);
         self.last_update = Instant::now();
     }
 
     pub fn onset_dims(&self) -> usize { self.onset_len }
     pub fn onset_data(&self) -> &Vec<f32> { &self.onset }
+
+    /// push a new low-frequency onset value (0..1); shifts existing values left
+    pub fn push_low_onset(&mut self, v: f32) {
+        if self.low_onset.is_empty() {
+            return;
+        }
+        // shift left
+        self.low_onset.copy_within(1..self.low_onset_len, 0);
+        self.low_onset[self.low_onset_len - 1] = f32::clamp(v, 0.0, 1.0);
+        self.low_onset_version = self.low_onset_version.wrapping_add(1);
+        self.last_update = Instant::now();
+    }
+
+    pub fn low_onset_dims(&self) -> usize { self.low_onset_len }
+    pub fn low_onset_data(&self) -> &Vec<f32> { &self.low_onset }
 }
 
 /// spectrogram resolution used for cpu staging (bins x columns)

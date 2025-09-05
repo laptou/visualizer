@@ -2,6 +2,7 @@ use crate::app::{GpuContext, run_windowed};
 use crate::gfx::{Color, DrawContext};
 use crate::shared::{SPECTRO_BINS, SPECTRO_COLS, SharedState};
 use anyhow::{Context, Result};
+use std::cmp::max;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::info;
@@ -21,6 +22,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
         onset_tex_id: Option<usize>,
         onset_version_seen: u64,
         onset_rgba: Vec<u8>,
+        low_onset_tex_id: Option<usize>,
+        low_onset_version_seen: u64,
+        low_onset_rgba: Vec<u8>,
         uv_tex_id: Option<usize>,
     }
 
@@ -48,6 +52,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 onset_tex_id: None,
                 onset_version_seen: 0,
                 onset_rgba: Vec::new(),
+                low_onset_tex_id: None,
+                low_onset_version_seen: 0,
+                low_onset_rgba: Vec::new(),
                 uv_tex_id: None,
             })
         },
@@ -77,6 +84,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 _onset_ver,
                 onset_len,
                 onset_data,
+                _low_onset_ver,
+                low_onset_len,
+                low_onset_data,
             ) = {
                 if let Ok(s) = shared.lock() {
                     (
@@ -91,6 +101,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         s.onset_version,
                         s.onset_dims(),
                         s.onset_data().clone(),
+                        s.low_onset_version,
+                        s.low_onset_dims(),
+                        s.low_onset_data().clone(),
                     )
                 } else {
                     (
@@ -101,6 +114,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         0,
                         SPECTRO_BINS,
                         SPECTRO_COLS,
+                        Vec::new(),
+                        0,
+                        0,
                         Vec::new(),
                         0,
                         0,
@@ -187,9 +203,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             let dt_kick = last_kick_at
                 .map(|t| now.duration_since(t).as_secs_f32())
                 .unwrap_or(10.0);
-            let t_norm = (dt_kick / 0.6).clamp(0.0, 1.0);
+            let t_norm = f32::clamp(dt_kick / 0.6, 0.0, 1.0);
             let ease = (1.0 - t_norm).powi(2);
-            let max_square = 0.7 * w.min(h);
+            let max_square = 0.7 * f32::min(w, h);
             let kick_size = (0.2 * max_square) + ease * (0.8 * max_square);
             let kick_x = center_x - kick_size * 0.5;
             let kick_y = center_y + h * 0.08 - kick_size * 0.5; // slightly below true center to make room for text
@@ -202,25 +218,25 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             );
 
             // spectrogram square size (bigger)
-            let square = 0.55 * w.min(h);
+            let square = 0.55 * f32::min(w, h);
             let spec_x = center_x - square * 0.5;
             let spec_y = center_y + h * 0.08 - square * 0.5;
             // ensure uv texture exists and encode log-y, linear-x mapping in RG
             if state.uv_tex_id.is_none() {
-                let uv_w = cols.max(1);
-                let uv_h = bins.max(1);
+                let uv_w = max(cols, 1);
+                let uv_h = max(bins, 1);
                 let uv_id = state.draw.create_texture_rgba8(uv_w, uv_h);
                 state.uv_tex_id = Some(uv_id);
                 // build uv cpu buffer: for each output (x,y), write src uv in 0..1
                 let mut buf = vec![0u8; (uv_w * uv_h * 4) as usize];
                 for y in 0..uv_h {
-                    let ty = y as f32 / (uv_h - 1).max(1) as f32;
+                    let ty = y as f32 / max(uv_h - 1, 1) as f32;
                     for x in 0..uv_w {
-                        let tx = x as f32 / (uv_w - 1).max(1) as f32;
-                        let u = (tx.clamp(0.0, 1.0) * 255.0) as u8;
-                        // compute logarithmic mapping: v = log10(1 + 9*ty)
+                        let tx = x as f32 / max(uv_w - 1, 1) as f32;
+                        let u = (f32::clamp(tx, 0.0, 1.0) * 255.0) as u8;
+
                         let log_v = (1.0 + 9.0 * ty).log10();
-                        let v = (log_v.clamp(0.0, 1.0) * 255.0) as u8;
+                        let v = (f32::clamp(log_v, 0.0, 1.0) * 255.0) as u8;
                         let o = ((y * uv_w + x) * 4) as usize;
                         buf[o + 0] = u; // R = u
                         buf[o + 1] = v; // G = v
@@ -243,18 +259,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     uv,
                     Color::rgba(1.0, 1.0, 1.0, 1.0),
                 );
-
-                let _ = state.draw.texture(
-                    spec_x,
-                    spec_y,
-                    square,
-                    square,
-                    uv,
-                    Color::rgba(1.0, 1.0, 1.0, 1.0),
-                );
             }
 
-            // onset graph below spectrogram: draw a filled polyline area
+            // onset graphs below spectrogram: draw stretched intensity strips
             if onset_len > 0 && !onset_data.is_empty() {
                 // ensure onset texture exists (1px tall, stretched when drawn)
                 if state.onset_tex_id.is_none() {
@@ -268,10 +275,12 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     state.onset_rgba.resize(onset_len * 4, 0);
                     for i in 0..onset_len {
                         let v = onset_data[i].clamp(0.0, 1.0);
-                        // tint: teal-green scaled by intensity
-                        let r = (0.20 * v * 255.0) as u8;
-                        let g = (0.90 * v * 255.0) as u8;
-                        let b = (0.60 * v * 255.0) as u8;
+                        // log-scale brightness: small values show up more, big values compress
+                        let l = f32::clamp((1.0 + 9.0 * v).log10(), 0.0, 1.0);
+                        // tint: teal-green scaled by log intensity
+                        let r = (0.20 * l * 255.0) as u8;
+                        let g = (0.90 * l * 255.0) as u8;
+                        let b = (0.60 * l * 255.0) as u8;
                         let o = i * 4;
                         state.onset_rgba[o + 0] = r;
                         state.onset_rgba[o + 1] = g;
@@ -286,9 +295,55 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 // draw stretched intensity strip
                 if let Some(id) = state.onset_tex_id {
                     let graph_w = square;
-                    let graph_h = (square * 0.22).max(40.0);
+                    let graph_h = (square * 0.18).max(36.0);
                     let gx = spec_x;
                     let gy = spec_y + square + 10.0;
+                    let _ = state.draw.texture(
+                        gx,
+                        gy,
+                        graph_w,
+                        graph_h,
+                        id,
+                        Color::rgba(1.0, 1.0, 1.0, 1.0),
+                    );
+                }
+            }
+
+            // low-frequency onset graph under the main onset graph
+            if low_onset_len > 0 && !low_onset_data.is_empty() {
+                if state.low_onset_tex_id.is_none() {
+                    let tex_id = state.draw.create_texture_rgba8(low_onset_len as u32, 1);
+                    state.low_onset_tex_id = Some(tex_id);
+                    state.low_onset_rgba.resize(low_onset_len * 4, 0);
+                    state.low_onset_version_seen = 0;
+                }
+                if state.low_onset_version_seen != _low_onset_ver {
+                    state.low_onset_rgba.resize(low_onset_len * 4, 0);
+                    for i in 0..low_onset_len {
+                        let v = low_onset_data[i].clamp(0.0, 1.0);
+                        // log-scale brightness for low-band
+                        let l = f32::clamp((1.0 + 9.0 * v).log10(), 0.0, 1.0);
+                        // tint: amber for low-frequency onsets
+                        let r = (0.95 * l * 255.0) as u8;
+                        let g = (0.65 * l * 255.0) as u8;
+                        let b = (0.20 * l * 255.0) as u8;
+                        let o = i * 4;
+                        state.low_onset_rgba[o + 0] = r;
+                        state.low_onset_rgba[o + 1] = g;
+                        state.low_onset_rgba[o + 2] = b;
+                        state.low_onset_rgba[o + 3] = 255;
+                    }
+                    if let Some(id) = state.low_onset_tex_id {
+                        let _ = state.draw.update_texture_rgba8(id, &state.low_onset_rgba);
+                    }
+                    state.low_onset_version_seen = _low_onset_ver;
+                }
+                if let Some(id) = state.low_onset_tex_id {
+                    let graph_w = square;
+                    let graph_h = (square * 0.18).max(36.0);
+                    let gx = spec_x;
+                    // place below the main onset graph with small gap
+                    let gy = spec_y + square + 10.0 + (square * 0.18).max(36.0) + 6.0;
                     let _ = state.draw.texture(
                         gx,
                         gy,
@@ -311,7 +366,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 center_y - square * 0.55,
                 &label,
                 crate::gfx::TextOptions {
-                    px: (w.min(h) * 0.12).clamp(28.0, 128.0),
+                    px: f32::clamp(w.min(h) * 0.12, 28.0, 128.0),
                     color: Color::rgba(1.0, 1.0, 1.0, 1.0),
                     halign: crate::gfx::TextHAlign::Center,
                     valign: crate::gfx::TextVAlign::Middle,
