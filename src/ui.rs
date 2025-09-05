@@ -1,5 +1,6 @@
 use crate::app::{GpuContext, run_windowed};
 use crate::gfx::{Color, DrawContext};
+use crate::intensity_chart::{AxisScale, IntensityChart, IntensityChartOptions, IntensityScale};
 use crate::shared::{SPECTRO_BINS, SPECTRO_COLS, SharedState};
 use anyhow::{Context, Result};
 use std::cmp::max;
@@ -19,12 +20,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
         spectro_tex_id: Option<usize>,
         spectro_version_seen: u64,
         cpu_rgba: Vec<u8>,
-        onset_tex_id: Option<usize>,
+        onset_chart: Option<IntensityChart>,
         onset_version_seen: u64,
-        onset_rgba: Vec<u8>,
-        low_onset_tex_id: Option<usize>,
+        low_onset_chart: Option<IntensityChart>,
         low_onset_version_seen: u64,
-        low_onset_rgba: Vec<u8>,
         uv_tex_id: Option<usize>,
     }
 
@@ -49,12 +48,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 spectro_tex_id: None,
                 spectro_version_seen: 0,
                 cpu_rgba: vec![0; (SPECTRO_BINS as usize) * (SPECTRO_COLS as usize) * 4],
-                onset_tex_id: None,
+                onset_chart: None,
                 onset_version_seen: 0,
-                onset_rgba: Vec::new(),
-                low_onset_tex_id: None,
+                low_onset_chart: None,
                 low_onset_version_seen: 0,
-                low_onset_rgba: Vec::new(),
                 uv_tex_id: None,
             })
         },
@@ -81,10 +78,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 bins,
                 cols,
                 spectro_data,
-                _onset_ver,
+                onset_ver,
                 onset_len,
                 onset_data,
-                _low_onset_ver,
+                low_onset_ver,
                 low_onset_len,
                 low_onset_data,
             ) = {
@@ -261,97 +258,64 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 );
             }
 
-            // onset graphs below spectrogram: draw stretched intensity strips
+            // onset graphs below spectrogram: draw stretched intensity strips via intensity chart
             if onset_len > 0 && !onset_data.is_empty() {
-                // ensure onset texture exists (1px tall, stretched when drawn)
-                if state.onset_tex_id.is_none() {
-                    let tex_id = state.draw.create_texture_rgba8(onset_len as u32, 1);
-                    state.onset_tex_id = Some(tex_id);
-                    state.onset_rgba.resize(onset_len * 4, 0);
+                if state.onset_chart.is_none() {
+                    let chart = IntensityChart::new(IntensityChartOptions {
+                        display_cols: onset_len as u32,
+                        display_rows: 1,
+                        x_scale: AxisScale::Linear,
+                        y_scale: AxisScale::Linear,
+                        intensity_scale: IntensityScale::Log { k: 9.0 },
+                        tint: Color::rgba(0.20, 0.90, 0.60, 1.0),
+                    });
+                    state.onset_chart = Some(chart);
                     state.onset_version_seen = 0;
                 }
-                // update onset texture if new data arrived
-                if state.onset_version_seen != _onset_ver {
-                    state.onset_rgba.resize(onset_len * 4, 0);
-                    for i in 0..onset_len {
-                        let v = f32::clamp(onset_data[i], 0.0, 1.0);
-                        // log-scale brightness: small values show up more, big values compress
-                        let l = f32::clamp((1.0 + 9.0 * v).log10(), 0.0, 1.0);
-                        // tint: teal-green scaled by log intensity
-                        let r = (0.20 * l * 255.0) as u8;
-                        let g = (0.90 * l * 255.0) as u8;
-                        let b = (0.60 * l * 255.0) as u8;
-                        let o = i * 4;
-                        state.onset_rgba[o + 0] = r;
-                        state.onset_rgba[o + 1] = g;
-                        state.onset_rgba[o + 2] = b;
-                        state.onset_rgba[o + 3] = 255;
+                if state.onset_version_seen != onset_ver {
+                    if let Some(chart) = &mut state.onset_chart {
+                        chart.set_display_dims(onset_len as u32, 1);
+                        let _ = chart.update(&mut state.draw, onset_len as u32, 1, &onset_data);
                     }
-                    if let Some(id) = state.onset_tex_id {
-                        let _ = state.draw.update_texture_rgba8(id, &state.onset_rgba);
-                    }
-                    state.onset_version_seen = _onset_ver;
+                    state.onset_version_seen = onset_ver;
                 }
-                // draw stretched intensity strip
-                if let Some(id) = state.onset_tex_id {
+                if let Some(chart) = &mut state.onset_chart {
                     let graph_w = square;
                     let graph_h = f32::max(square * 0.18, 36.0);
                     let gx = spec_x;
                     let gy = spec_y + square + 10.0;
-                    let _ = state.draw.texture(
-                        gx,
-                        gy,
-                        graph_w,
-                        graph_h,
-                        id,
-                        Color::rgba(1.0, 1.0, 1.0, 1.0),
-                    );
+                    let _ = chart.render(&mut state.draw, gx, gy, graph_w, graph_h);
                 }
             }
 
             // low-frequency onset graph under the main onset graph
             if low_onset_len > 0 && !low_onset_data.is_empty() {
-                if state.low_onset_tex_id.is_none() {
-                    let tex_id = state.draw.create_texture_rgba8(low_onset_len as u32, 1);
-                    state.low_onset_tex_id = Some(tex_id);
-                    state.low_onset_rgba.resize(low_onset_len * 4, 0);
+                if state.low_onset_chart.is_none() {
+                    let chart = IntensityChart::new(IntensityChartOptions {
+                        display_cols: low_onset_len as u32,
+                        display_rows: 1,
+                        x_scale: AxisScale::Linear,
+                        y_scale: AxisScale::Linear,
+                        intensity_scale: IntensityScale::Log { k: 9.0 },
+                        tint: Color::rgba(0.95, 0.65, 0.20, 1.0),
+                    });
+                    state.low_onset_chart = Some(chart);
                     state.low_onset_version_seen = 0;
                 }
-                if state.low_onset_version_seen != _low_onset_ver {
-                    state.low_onset_rgba.resize(low_onset_len * 4, 0);
-                    for i in 0..low_onset_len {
-                        let v = f32::clamp(low_onset_data[i], 0.0, 1.0);
-                        // log-scale brightness for low-band
-                        let l = f32::clamp((1.0 + 9.0 * v).log10(), 0.0, 1.0);
-                        // tint: amber for low-frequency onsets
-                        let r = (0.95 * l * 255.0) as u8;
-                        let g = (0.65 * l * 255.0) as u8;
-                        let b = (0.20 * l * 255.0) as u8;
-                        let o = i * 4;
-                        state.low_onset_rgba[o + 0] = r;
-                        state.low_onset_rgba[o + 1] = g;
-                        state.low_onset_rgba[o + 2] = b;
-                        state.low_onset_rgba[o + 3] = 255;
+                if state.low_onset_version_seen != low_onset_ver {
+                    if let Some(chart) = &mut state.low_onset_chart {
+                        chart.set_display_dims(low_onset_len as u32, 1);
+                        let _ = chart.update(&mut state.draw, low_onset_len as u32, 1, &low_onset_data);
                     }
-                    if let Some(id) = state.low_onset_tex_id {
-                        let _ = state.draw.update_texture_rgba8(id, &state.low_onset_rgba);
-                    }
-                    state.low_onset_version_seen = _low_onset_ver;
+                    state.low_onset_version_seen = low_onset_ver;
                 }
-                if let Some(id) = state.low_onset_tex_id {
+                if let Some(chart) = &mut state.low_onset_chart {
                     let graph_w = square;
                     let graph_h = f32::max(square * 0.18, 36.0);
                     let gx = spec_x;
                     // place below the main onset graph with small gap
                     let gy = spec_y + square + 10.0 + f32::max(square * 0.18, 36.0) + 6.0;
-                    let _ = state.draw.texture(
-                        gx,
-                        gy,
-                        graph_w,
-                        graph_h,
-                        id,
-                        Color::rgba(1.0, 1.0, 1.0, 1.0),
-                    );
+                    let _ = chart.render(&mut state.draw, gx, gy, graph_w, graph_h);
                 }
             }
 
