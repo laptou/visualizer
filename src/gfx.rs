@@ -286,27 +286,28 @@ impl DrawContext {
             push_constant_ranges: &[],
         });
 
-        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("texture bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         let pipeline_layout_tex = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("drawcontext texture pipeline layout"),
@@ -315,19 +316,44 @@ impl DrawContext {
         });
 
         // uv bind group: sampler + source texture + uv texture (rgba where rg=uv)
-        let uv_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("texture uv bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } }, count: None },
-            ],
-        });
-        let pipeline_layout_tex_uv = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("drawcontext texture uv pipeline layout"),
-            bind_group_layouts: &[&screen_bind_group_layout, &uv_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let uv_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture uv bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let pipeline_layout_tex_uv =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("drawcontext texture uv pipeline layout"),
+                bind_group_layouts: &[&screen_bind_group_layout, &uv_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuVertex>() as BufferAddress,
@@ -350,9 +376,21 @@ impl DrawContext {
             array_stride: std::mem::size_of::<GpuVertexTex>() as BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { shader_location: 0, offset: 0, format: wgpu::VertexFormat::Float32x3 },
-                wgpu::VertexAttribute { shader_location: 1, offset: 12, format: wgpu::VertexFormat::Float32x2 },
-                wgpu::VertexAttribute { shader_location: 2, offset: 20, format: wgpu::VertexFormat::Float32x4 },
+                wgpu::VertexAttribute {
+                    shader_location: 0,
+                    offset: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    shader_location: 1,
+                    offset: 12,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    shader_location: 2,
+                    offset: 20,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
             ],
         };
 
@@ -664,14 +702,46 @@ impl DrawContext {
     }
 
     /// draw a textured quad covering [x,y,w,h]
-    pub fn texture(&mut self, x: f32, y: f32, w: f32, h: f32, tex_id: usize, color: Color) -> Result<()> {
-        self.ops.push(DrawOp::Texture { x, y, w, h, tex_id, color });
+    pub fn texture(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tex_id: usize,
+        color: Color,
+    ) -> Result<()> {
+        self.ops.push(DrawOp::Texture {
+            x,
+            y,
+            w,
+            h,
+            tex_id,
+            color,
+        });
         Ok(())
     }
 
     /// draw a textured quad with uv-remap, sampling source using coordinates in uv texture (rg channels)
-    pub fn texture_with_uv(&mut self, x: f32, y: f32, w: f32, h: f32, src_tex_id: usize, uv_tex_id: usize, color: Color) -> Result<()> {
-        self.ops.push(DrawOp::TextureUV { x, y, w, h, src_tex_id, uv_tex_id, color });
+    pub fn texture_with_uv(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        src_tex_id: usize,
+        uv_tex_id: usize,
+        color: Color,
+    ) -> Result<()> {
+        self.ops.push(DrawOp::TextureUV {
+            x,
+            y,
+            w,
+            h,
+            src_tex_id,
+            uv_tex_id,
+            color,
+        });
         Ok(())
     }
 
@@ -815,27 +885,85 @@ impl DrawContext {
                             clipped: cur_ctx.clipped,
                         });
                     }
-                    DrawOp::Texture { x, y, w, h, tex_id, color } => {
+                    DrawOp::Texture {
+                        x,
+                        y,
+                        w,
+                        h,
+                        tex_id,
+                        color,
+                    } => {
                         let z = cur_ctx.z;
                         let v = vec![
-                            GpuVertexTex { pos: [x, y, z], uv: [0.0, 0.0], color: color.to_array() },
-                            GpuVertexTex { pos: [x + w, y, z], uv: [1.0, 0.0], color: color.to_array() },
-                            GpuVertexTex { pos: [x + w, y + h, z], uv: [1.0, 1.0], color: color.to_array() },
-                            GpuVertexTex { pos: [x, y + h, z], uv: [0.0, 1.0], color: color.to_array() },
+                            GpuVertexTex {
+                                pos: [x, y, z],
+                                uv: [0.0, 0.0],
+                                color: color.to_array(),
+                            },
+                            GpuVertexTex {
+                                pos: [x + w, y, z],
+                                uv: [1.0, 0.0],
+                                color: color.to_array(),
+                            },
+                            GpuVertexTex {
+                                pos: [x + w, y + h, z],
+                                uv: [1.0, 1.0],
+                                color: color.to_array(),
+                            },
+                            GpuVertexTex {
+                                pos: [x, y + h, z],
+                                uv: [0.0, 1.0],
+                                color: color.to_array(),
+                            },
                         ];
                         let i = vec![0u32, 1, 2, 0, 2, 3];
-                        steps.push(Step::DrawTexture { vertices: v, indices: i, tex_id, clipped: cur_ctx.clipped });
+                        steps.push(Step::DrawTexture {
+                            vertices: v,
+                            indices: i,
+                            tex_id,
+                            clipped: cur_ctx.clipped,
+                        });
                     }
-                    DrawOp::TextureUV { x, y, w, h, src_tex_id, uv_tex_id, color } => {
+                    DrawOp::TextureUV {
+                        x,
+                        y,
+                        w,
+                        h,
+                        src_tex_id,
+                        uv_tex_id,
+                        color,
+                    } => {
                         let z = cur_ctx.z;
                         let v = vec![
-                            GpuVertexTex { pos: [x, y, z], uv: [0.0, 0.0], color: color.to_array() },
-                            GpuVertexTex { pos: [x + w, y, z], uv: [1.0, 0.0], color: color.to_array() },
-                            GpuVertexTex { pos: [x + w, y + h, z], uv: [1.0, 1.0], color: color.to_array() },
-                            GpuVertexTex { pos: [x, y + h, z], uv: [0.0, 1.0], color: color.to_array() },
+                            GpuVertexTex {
+                                pos: [x, y, z],
+                                uv: [0.0, 0.0],
+                                color: color.to_array(),
+                            },
+                            GpuVertexTex {
+                                pos: [x + w, y, z],
+                                uv: [1.0, 0.0],
+                                color: color.to_array(),
+                            },
+                            GpuVertexTex {
+                                pos: [x + w, y + h, z],
+                                uv: [1.0, 1.0],
+                                color: color.to_array(),
+                            },
+                            GpuVertexTex {
+                                pos: [x, y + h, z],
+                                uv: [0.0, 1.0],
+                                color: color.to_array(),
+                            },
                         ];
                         let i = vec![0u32, 1, 2, 0, 2, 3];
-                        steps.push(Step::DrawTextureUV { vertices: v, indices: i, src_tex_id, uv_tex_id, clipped: cur_ctx.clipped });
+                        steps.push(Step::DrawTextureUV {
+                            vertices: v,
+                            indices: i,
+                            src_tex_id,
+                            uv_tex_id,
+                            clipped: cur_ctx.clipped,
+                        });
                     }
                     DrawOp::Text { x, y, text, opts } => {
                         // build buffer; prepare during execution to avoid lifetimes
@@ -1106,10 +1234,19 @@ impl DrawContext {
                         .render(&self.text_atlas, &self.viewport, &mut rpass)
                         .context("text render")?;
                 }
-                Step::DrawTexture { vertices, indices, tex_id, clipped } => {
+                Step::DrawTexture {
+                    vertices,
+                    indices,
+                    tex_id,
+                    clipped,
+                } => {
                     if let Some(tex) = self.textures.get(tex_id) {
                         let (vbuf, ibuf, icount) = self.upload_tex(vertices, indices);
-                        let pipe = if clipped { &self.pipeline_texture_stencil } else { &self.pipeline_texture };
+                        let pipe = if clipped {
+                            &self.pipeline_texture_stencil
+                        } else {
+                            &self.pipeline_texture
+                        };
                         if clipped {
                             rpass.set_stencil_reference(1);
                         }
@@ -1121,20 +1258,43 @@ impl DrawContext {
                         rpass.draw_indexed(0..icount, 0, 0..1);
                     }
                 }
-                Step::DrawTextureUV { vertices, indices, src_tex_id, uv_tex_id, clipped } => {
-                    if let (Some(src), Some(uv)) = (self.textures.get(src_tex_id), self.textures.get(uv_tex_id)) {
+                Step::DrawTextureUV {
+                    vertices,
+                    indices,
+                    src_tex_id,
+                    uv_tex_id,
+                    clipped,
+                } => {
+                    if let (Some(src), Some(uv)) =
+                        (self.textures.get(src_tex_id), self.textures.get(uv_tex_id))
+                    {
                         // build a combined bind group dynamically for src+uv using the uv layout
                         let (vbuf, ibuf, icount) = self.upload_tex(vertices, indices);
-                        let pipe = if clipped { &self.pipeline_texture_uv_stencil } else { &self.pipeline_texture_uv };
-                        if clipped { rpass.set_stencil_reference(1); }
+                        let pipe = if clipped {
+                            &self.pipeline_texture_uv_stencil
+                        } else {
+                            &self.pipeline_texture_uv
+                        };
+                        if clipped {
+                            rpass.set_stencil_reference(1);
+                        }
                         // create a transient bind group coupling the sampler with src and uv views
                         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("im2d tex uv bg transient"),
                             layout: &self.uv_bind_group_layout,
                             entries: &[
-                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&src.sampler) },
-                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&src.view) },
-                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&uv.view) },
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::Sampler(&src.sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(&src.view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::TextureView(&uv.view),
+                                },
                             ],
                         });
                         rpass.set_pipeline(pipe);
@@ -1347,7 +1507,10 @@ fn create_texture_pipeline(
             targets: &[Some(color_state)],
             compilation_options: Default::default(),
         }),
-        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
         depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
@@ -1401,8 +1564,10 @@ impl DrawContext {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&vertices));
-        self.queue.write_buffer(&ibuf, 0, bytemuck::cast_slice(&indices));
+        self.queue
+            .write_buffer(&vbuf, 0, bytemuck::cast_slice(&vertices));
+        self.queue
+            .write_buffer(&ibuf, 0, bytemuck::cast_slice(&indices));
         (vbuf, ibuf, indices.len() as u32)
     }
 

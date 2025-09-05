@@ -86,7 +86,8 @@ impl SharedState {
         for b in 0..self.spectro_bins {
             let row_start = b * self.spectro_cols;
             // move [1..cols) -> [0..cols-1)
-            self.spectrogram.copy_within(row_start + 1..row_start + self.spectro_cols, row_start);
+            self.spectrogram
+                .copy_within(row_start + 1..row_start + self.spectro_cols, row_start);
             // write newest at last column
             self.spectrogram[row_start + self.spectro_cols - 1] = slice[b].clamp(0.0, 1.0);
         }
@@ -114,8 +115,12 @@ impl SharedState {
         self.last_update = Instant::now();
     }
 
-    pub fn onset_dims(&self) -> usize { self.onset_len }
-    pub fn onset_data(&self) -> &Vec<f32> { &self.onset }
+    pub fn onset_dims(&self) -> usize {
+        self.onset_len
+    }
+    pub fn onset_data(&self) -> &Vec<f32> {
+        &self.onset
+    }
 
     /// push a new low-frequency onset value (0..1); shifts existing values left
     pub fn push_low_onset(&mut self, v: f32) {
@@ -129,8 +134,12 @@ impl SharedState {
         self.last_update = Instant::now();
     }
 
-    pub fn low_onset_dims(&self) -> usize { self.low_onset_len }
-    pub fn low_onset_data(&self) -> &Vec<f32> { &self.low_onset }
+    pub fn low_onset_dims(&self) -> usize {
+        self.low_onset_len
+    }
+    pub fn low_onset_data(&self) -> &Vec<f32> {
+        &self.low_onset
+    }
 }
 
 /// spectrogram resolution used for cpu staging (bins x columns)

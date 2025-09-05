@@ -1,13 +1,13 @@
-use crate::shared::{SharedState, SPECTRO_BINS};
+use crate::shared::{SPECTRO_BINS, SharedState};
 use crate::utils::median;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
+use std::cmp::min;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::cmp::min;
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, trace};
@@ -87,7 +87,7 @@ impl AudioProcessor {
 
         while self.sample_buffer.len() >= BUFFER_SIZE {
             self.process_audio_window();
-            
+
             for _ in 0..self.hop_size {
                 if self.sample_buffer.pop_front().is_none() {
                     break;
@@ -190,7 +190,11 @@ impl AudioProcessor {
             s.push_spectrogram_slice(&tmp);
             // compute a small baseline from recent history
             let slice: Vec<f32> = self.onset_history.iter().copied().collect();
-            let med = if !slice.is_empty() { median(slice) } else { 1e-6 };
+            let med = if !slice.is_empty() {
+                median(slice)
+            } else {
+                1e-6
+            };
             // push normalized onset for graph (normalize by dynamic baseline)
             let norm = f32::clamp(onset_strength / f32::max(med, 1e-6), 0.0, 4.0) / 4.0;
             s.push_onset(norm);
@@ -265,8 +269,7 @@ impl AudioProcessor {
             .sum();
         // low-band-only flux for kick detection
         let max_low_bin = min((KICK_BAND_MAX_HZ / bin_hz) as usize, weighted.len());
-        let lowband_flux: f32 = weighted
-            [0..max_low_bin]
+        let lowband_flux: f32 = weighted[0..max_low_bin]
             .iter()
             .zip(self.prev_weighted_magnitudes[0..max_low_bin].iter())
             .map(|(&current, &previous)| f32::max(current - previous, 0.0))
