@@ -1,6 +1,6 @@
 use crate::app::{GpuContext, run_windowed};
 use crate::gfx::{Color, DrawContext};
-use crate::shared::SharedState;
+use crate::shared::{SharedState, SPECTRO_BINS, SPECTRO_COLS};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,6 +15,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
         draw: DrawContext,
         last_title_update: Instant,
         last_size: (u32, u32),
+        spectro_tex_id: Option<usize>,
+        spectro_version_seen: u64,
+        cpu_rgba: Vec<u8>,
     }
 
     info!("ui started");
@@ -35,6 +38,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 draw,
                 last_title_update: Instant::now(),
                 last_size: (ctx.config.width, ctx.config.height),
+                spectro_tex_id: None,
+                spectro_version_seen: 0,
+                cpu_rgba: vec![0; (SPECTRO_BINS as usize) * (SPECTRO_COLS as usize) * 4],
             })
         },
         |ctx: &mut GpuContext,
@@ -50,39 +56,24 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 state.last_size = cur_size;
             }
 
-            // compute beat phase and color
-            let (bpm, avg_rms, last_beat_at) = {
+            // read shared measurements
+            let (bpm, _avg_rms, _last_beat_at, last_kick_at, spectro_ver, bins, cols, spectro_data) = {
                 if let Ok(s) = shared.lock() {
-                    (s.current_bpm, s.avg_rms, s.last_beat_at)
+                    (
+                        s.current_bpm,
+                        s.avg_rms,
+                        s.last_beat_at,
+                        s.last_kick_at,
+                        s.spectrogram_version,
+                        s.spectrogram_dims().0 as u32,
+                        s.spectrogram_dims().1 as u32,
+                        s.spectrogram_data().clone(),
+                    )
                 } else {
-                    (0.0, 0.0, None)
+                    (0.0, 0.0, None, None, 0, SPECTRO_BINS, SPECTRO_COLS, Vec::new())
                 }
             };
-            let beats_per_second = if bpm > 0.0 { bpm / 60.0 } else { 0.0 };
             let now = Instant::now();
-            let phase = match (last_beat_at, beats_per_second > 0.0) {
-                (Some(t), true) => {
-                    let dt = now.duration_since(t).as_secs_f32();
-                    (dt * beats_per_second).fract()
-                }
-                _ => 0.0,
-            };
-            // red flash envelope: quick spike at beat, decay over the rest of the cycle
-            let flash = if beats_per_second > 0.0 {
-                let attack = 0.1; // first 10% of cycle bright
-                if phase < attack {
-                    1.0
-                } else {
-                    (1.0 - (phase - attack) / (1.0 - attack)).max(0.0)
-                }
-            } else {
-                0.05
-            };
-            // dampen if essentially silent
-            let silence = if avg_rms < 0.001 { 0.2 } else { 1.0 };
-            let r = (flash * silence).clamp(0.05, 1.0);
-            let g = 0.05f32;
-            let b = 0.06f32;
 
             if state.last_title_update.elapsed() >= Duration::from_millis(250) {
                 if bpm > 0.0 {
@@ -93,7 +84,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 state.last_title_update = Instant::now();
             }
 
-            // clear
+            // clear background
             {
                 let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("clear pass"),
@@ -101,12 +92,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: r as f64,
-                                g: g as f64,
-                                b: b as f64,
-                                a: 1.0,
-                            }),
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.04, g: 0.05, b: 0.06, a: 1.0 }),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -120,41 +106,87 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             state.draw.begin_frame();
             let w = ctx.config.width as f32;
             let h = ctx.config.height as f32;
-            // animated rectangle based on beat phase
-            let rect_w = (w * 0.2) * (0.5 + 0.5 * flash);
-            let rect_h = 40.0;
-            let x = (w - rect_w) * phase;
-            let y = h * 0.1;
-            let _ = state
-                .draw
-                .rect(x, y, rect_w, rect_h, Color::rgba(0.2, 0.8, 0.6, 1.0));
-            // a simple polygon bar responding to rms
-            let bar_h = (avg_rms * 600.0).clamp(2.0, h * 0.5);
-            let poly = vec![
-                [w * 0.1, h * 0.9],
-                [w * 0.1 + 10.0, h * 0.9],
-                [w * 0.1 + 10.0, h * 0.9 - bar_h],
-                [w * 0.1, h * 0.9 - bar_h],
-            ];
-            let _ = state.draw.polygon(&poly, Color::rgba(0.9, 0.9, 0.2, 1.0));
-            // text showing bpm
-            if bpm > 0.0 {
-                state.draw.text(
-                    w * 0.05,
-                    h * 0.08,
-                    &format!("{:.1} bpm", bpm),
-                    28.0,
-                    Color::rgba(1.0, 1.0, 1.0, 1.0),
-                );
-            } else {
-                state.draw.text(
-                    w * 0.05,
-                    h * 0.08,
-                    "analyzing...",
-                    28.0,
-                    Color::rgba(1.0, 1.0, 1.0, 1.0),
-                );
+
+            // ensure spectrogram texture exists
+            if state.spectro_tex_id.is_none() {
+                let tex_id = state.draw.create_texture_rgba8(cols, bins);
+                state.spectro_tex_id = Some(tex_id);
             }
+
+            // update spectrogram texture if there's new data
+            if spectro_ver != state.spectro_version_seen && !spectro_data.is_empty() {
+                // map floats -> rgba8; flip vertically so low freqs are at bottom
+                let bins_usize = bins as usize;
+                let cols_usize = cols as usize;
+                state.cpu_rgba.resize(bins_usize * cols_usize * 4, 0);
+                for b in 0..bins_usize {
+                    let src_row = bins_usize - 1 - b;
+                    let src_off = src_row * cols_usize;
+                    let dst_off = b * cols_usize * 4;
+                    for c in 0..cols_usize {
+                        let v = spectro_data[src_off + c].clamp(0.0, 1.0);
+                        let g = (v * 255.0) as u8;
+                        let i = dst_off + c * 4;
+                        state.cpu_rgba[i + 0] = g; // r
+                        state.cpu_rgba[i + 1] = g; // g
+                        state.cpu_rgba[i + 2] = g; // b
+                        state.cpu_rgba[i + 3] = 255; // a
+                    }
+                }
+                if let Some(id) = state.spectro_tex_id {
+                    let _ = state.draw.update_texture_rgba8(id, &state.cpu_rgba);
+                }
+                state.spectro_version_seen = spectro_ver;
+            }
+
+            // layout: center bpm text; spectrogram square below it
+            let center_x = w * 0.5;
+            let center_y = h * 0.5;
+
+            // kick-synced big square behind spectrogram
+            let dt_kick = last_kick_at.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(10.0);
+            let t_norm = (dt_kick / 0.6).clamp(0.0, 1.0);
+            let ease = (1.0 - t_norm).powi(2);
+            let max_square = 0.7 * w.min(h);
+            let kick_size = (0.2 * max_square) + ease * (0.8 * max_square);
+            let kick_x = center_x - kick_size * 0.5;
+            let kick_y = center_y + h * 0.08 - kick_size * 0.5; // slightly below true center to make room for text
+            let _ = state.draw.rect(
+                kick_x,
+                kick_y,
+                kick_size,
+                kick_size,
+                Color::rgba(0.2, 0.5, 0.9, 0.25),
+            );
+
+            // spectrogram square size
+            let square = 0.38 * w.min(h);
+            let spec_x = center_x - square * 0.5;
+            let spec_y = center_y + h * 0.08 - square * 0.5;
+            if let Some(id) = state.spectro_tex_id {
+                let _ = state
+                    .draw
+                    .texture(spec_x, spec_y, square, square, id, Color::rgba(1.0, 1.0, 1.0, 1.0));
+            }
+
+            // bpm text in center
+            let label = if bpm > 0.0 {
+                format!("{:.1} bpm", bpm)
+            } else {
+                "analyzing...".to_string()
+            };
+            state.draw.text_with(
+                center_x,
+                center_y - square * 0.55,
+                &label,
+                crate::gfx::TextOptions {
+                    px: (w.min(h) * 0.12).clamp(28.0, 128.0),
+                    color: Color::rgba(1.0, 1.0, 1.0, 1.0),
+                    halign: crate::gfx::TextHAlign::Center,
+                    valign: crate::gfx::TextVAlign::Middle,
+                    ..Default::default()
+                },
+            );
 
             state
                 .draw

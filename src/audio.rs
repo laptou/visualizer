@@ -1,4 +1,4 @@
-use crate::shared::SharedState;
+use crate::shared::{SharedState, SPECTRO_BINS};
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
@@ -23,6 +23,8 @@ const BPM_MIN_CONFIDENCE_RATIO: f32 = 1.8; // min peak/median ratio to accept bp
 
 // onset detection thresholding
 const ONSET_PEAK_RATIO: f32 = 2.5; // how strong onset must be vs median to count as beat
+const KICK_PEAK_RATIO: f32 = 3.0; // how strong low-band onset must be vs median to count as kick
+const KICK_BAND_MAX_HZ: f32 = 150.0; // low-frequency band upper bound for kick detection
 
 // frequency weighting for onset detection
 const LOW_EMPH_FC: f32 = 300.0; // corner frequency for low boost
@@ -44,6 +46,8 @@ struct AudioProcessor {
     shared: Arc<Mutex<SharedState>>,
     // last known beat instant for phase derivation in ui
     last_beat_at: Option<Instant>,
+    // last strong kick timestamp
+    last_kick_at: Option<Instant>,
 }
 
 impl AudioProcessor {
@@ -60,6 +64,7 @@ impl AudioProcessor {
             hop_size,
             shared,
             last_beat_at: None,
+            last_kick_at: None,
         }
     }
 
@@ -84,10 +89,15 @@ impl AudioProcessor {
             }
         }
 
-        if self.last_bpm_print.elapsed() >= Duration::from_secs(1) {
+        if self.last_bpm_print.elapsed() >= Duration::from_millis(100) {
             let avg_rms = self.rms_history.iter().sum::<f32>() / self.rms_history.len() as f32;
             if let Ok(mut s) = self.shared.lock() {
-                s.set_measurements(self.current_bpm, avg_rms, self.last_beat_at);
+                s.set_measurements(
+                    self.current_bpm,
+                    avg_rms,
+                    self.last_beat_at,
+                    self.last_kick_at,
+                );
             }
 
             if avg_rms < SILENCE_THRESHOLD {
@@ -120,7 +130,8 @@ impl AudioProcessor {
             return;
         }
 
-        let onset_strength = self.calculate_onset_strength(&window);
+        let (onset_strength, spectro_slice, lowband_flux) =
+            self.calculate_onset_strength_and_slice(&window);
         let prev_last = self.onset_history.back().copied().unwrap_or(0.0);
         self.onset_history.push_back(onset_strength);
         if self.onset_history.len() > ONSET_HISTORY_SIZE {
@@ -142,9 +153,58 @@ impl AudioProcessor {
                 trace!("beat marked at strong onset");
             }
         }
+
+        // push spectrogram slice and track kick from low-band flux
+        if let Ok(mut s) = self.shared.lock() {
+            // remap spectro_slice (length BUFFER_SIZE/2) into SPECTRO_BINS
+            let bins = SPECTRO_BINS as usize;
+            let src = &spectro_slice;
+            let src_len = src.len();
+            let mut tmp = vec![0.0f32; bins];
+            if bins <= src_len {
+                // average blocks
+                let block = src_len as f32 / bins as f32;
+                for b in 0..bins {
+                    let start = (b as f32 * block).floor() as usize;
+                    let end = ((b as f32 + 1.0) * block).ceil() as usize;
+                    let end = end.min(src_len);
+                    let start = start.min(end);
+                    let mut sum = 0.0;
+                    let mut cnt = 0;
+                    for i in start..end {
+                        sum += src[i];
+                        cnt += 1;
+                    }
+                    tmp[b] = if cnt > 0 { sum / cnt as f32 } else { 0.0 };
+                }
+            } else {
+                // upsample by nearest
+                for b in 0..bins {
+                    let i = ((b as f32 / bins as f32) * src_len as f32).floor() as usize;
+                    tmp[b] = src[i.min(src_len - 1)];
+                }
+            }
+            s.push_spectrogram_slice(&tmp);
+        }
+
+        // detect kick using low-band flux with a simple median threshold
+        // keep a small ring buffer of recent lowband fluxes using onset_history for simplicity
+        // here we just re-use the same thresholding as above but on lowband_flux
+        if self.onset_history.len() >= 16 {
+            let mut slice: Vec<f32> = self.onset_history.iter().copied().collect();
+            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median_full = slice[slice.len() / 2].max(1e-6);
+            // derive a rough lowband baseline as some fraction of full median
+            // this is a heuristic to avoid an extra buffer; if lowband flux is very high vs baseline, mark kick
+            let baseline = 0.5 * median_full;
+            if lowband_flux > KICK_PEAK_RATIO * baseline {
+                self.last_kick_at = Some(Instant::now());
+                trace!("kick marked at strong low-band onset");
+            }
+        }
     }
 
-    fn calculate_onset_strength(&mut self, window: &[f32]) -> f32 {
+    fn calculate_onset_strength_and_slice(&mut self, window: &[f32]) -> (f32, Vec<f32>, f32) {
         let windowed: Vec<f32> = window
             .iter()
             .enumerate()
@@ -188,8 +248,27 @@ impl AudioProcessor {
             .zip(self.prev_weighted_magnitudes.iter())
             .map(|(&current, &previous)| (current - previous).max(0.0))
             .sum();
+        // low-band-only flux for kick detection
+        let max_low_bin = ((KICK_BAND_MAX_HZ / bin_hz) as usize).min(weighted.len());
+        let lowband_flux: f32 = weighted
+            [0..max_low_bin]
+            .iter()
+            .zip(self.prev_weighted_magnitudes[0..max_low_bin].iter())
+            .map(|(&current, &previous)| (current - previous).max(0.0))
+            .sum();
+
+        // build a spectrogram slice from weighted magnitudes with simple dynamic range mapping
+        let slice: Vec<f32> = weighted
+            .iter()
+            .map(|&v| {
+                let v = v.max(0.0);
+                let v = (v / 50.0).min(1.0); // simple scale; tuned empirically
+                v
+            })
+            .collect();
+
         self.prev_weighted_magnitudes.copy_from_slice(&weighted);
-        spectral_flux
+        (spectral_flux, slice, lowband_flux)
     }
 
     fn calculate_bpm(&mut self) -> f32 {

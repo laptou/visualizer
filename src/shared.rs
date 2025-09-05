@@ -11,25 +11,80 @@ pub struct SharedState {
     pub avg_rms: f32,
     /// last time a beat onset was detected; used to derive phase in ui
     pub last_beat_at: Option<Instant>,
+    /// last time a strong low-frequency onset (kick) was detected
+    pub last_kick_at: Option<Instant>,
     /// time of last update from audio thread
     pub last_update: Instant,
+
+    /// spectrogram storage: bins x columns, newest column at the rightmost index
+    /// values are normalized 0..1
+    spectro_bins: usize,
+    spectro_cols: usize,
+    spectrogram: Vec<f32>,
+    /// monotonically increasing counter incremented whenever a new slice is pushed
+    pub spectrogram_version: u64,
 }
 
 impl SharedState {
     pub fn new() -> Self {
+        // choose compact square spectrogram storage
+        let spectro_bins = SPECTRO_BINS as usize;
+        let spectro_cols = SPECTRO_COLS as usize;
         Self {
             current_bpm: 0.0,
             avg_rms: 0.0,
             last_beat_at: None,
+            last_kick_at: None,
             last_update: Instant::now(),
+            spectro_bins,
+            spectro_cols,
+            spectrogram: vec![0.0; spectro_bins * spectro_cols],
+            spectrogram_version: 0,
         }
     }
 
     /// set latest bpm and rms from audio thread
-    pub fn set_measurements(&mut self, bpm: f32, avg_rms: f32, last_beat_at: Option<Instant>) {
+    pub fn set_measurements(
+        &mut self,
+        bpm: f32,
+        avg_rms: f32,
+        last_beat_at: Option<Instant>,
+        last_kick_at: Option<Instant>,
+    ) {
         self.current_bpm = bpm;
         self.avg_rms = avg_rms;
         self.last_beat_at = last_beat_at;
+        self.last_kick_at = last_kick_at;
         self.last_update = Instant::now();
     }
+
+    /// push a new spectrogram column; newest data ends up in the last (rightmost) column
+    pub fn push_spectrogram_slice(&mut self, slice: &[f32]) {
+        if slice.len() != self.spectro_bins {
+            return;
+        }
+        // shift existing columns left by 1 for each bin row, and write new value to last col
+        // layout: row-major [bin][col]
+        for b in 0..self.spectro_bins {
+            let row_start = b * self.spectro_cols;
+            // move [1..cols) -> [0..cols-1)
+            self.spectrogram.copy_within(row_start + 1..row_start + self.spectro_cols, row_start);
+            // write newest at last column
+            self.spectrogram[row_start + self.spectro_cols - 1] = slice[b].clamp(0.0, 1.0);
+        }
+        self.spectrogram_version = self.spectrogram_version.wrapping_add(1);
+        self.last_update = Instant::now();
+    }
+
+    pub fn spectrogram_dims(&self) -> (usize, usize) {
+        (self.spectro_bins, self.spectro_cols)
+    }
+
+    pub fn spectrogram_data(&self) -> &Vec<f32> {
+        &self.spectrogram
+    }
 }
+
+/// spectrogram resolution used for cpu staging (bins x columns)
+pub const SPECTRO_BINS: u32 = 256;
+pub const SPECTRO_COLS: u32 = 256;
