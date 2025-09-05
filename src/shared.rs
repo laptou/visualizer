@@ -23,6 +23,12 @@ pub struct SharedState {
     spectrogram: Vec<f32>,
     /// monotonically increasing counter incremented whenever a new slice is pushed
     pub spectrogram_version: u64,
+
+    /// rolling onset intensity values (newest at the rightmost index)
+    onset_len: usize,
+    onset: Vec<f32>,
+    /// version bump whenever a new onset value is pushed
+    pub onset_version: u64,
 }
 
 impl SharedState {
@@ -40,6 +46,9 @@ impl SharedState {
             spectro_cols,
             spectrogram: vec![0.0; spectro_bins * spectro_cols],
             spectrogram_version: 0,
+            onset_len: spectro_cols,
+            onset: vec![0.0; spectro_cols],
+            onset_version: 0,
         }
     }
 
@@ -83,6 +92,21 @@ impl SharedState {
     pub fn spectrogram_data(&self) -> &Vec<f32> {
         &self.spectrogram
     }
+
+    /// push a new onset value (0..1); shifts existing values left
+    pub fn push_onset(&mut self, v: f32) {
+        if self.onset.is_empty() {
+            return;
+        }
+        // shift left
+        self.onset.copy_within(1..self.onset_len, 0);
+        self.onset[self.onset_len - 1] = v.clamp(0.0, 1.0);
+        self.onset_version = self.onset_version.wrapping_add(1);
+        self.last_update = Instant::now();
+    }
+
+    pub fn onset_dims(&self) -> usize { self.onset_len }
+    pub fn onset_data(&self) -> &Vec<f32> { &self.onset }
 }
 
 /// spectrogram resolution used for cpu staging (bins x columns)

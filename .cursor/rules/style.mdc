@@ -7,3 +7,7 @@ alwaysApply: true
 - write error messages and logging messages in lowercase
 - run outputs through `tracing`
 - run errors through `anyhow`, prefer using `.context()` to other methods of converting errors to `anyhow::Error`
+- prefer calls like `f32::max(a, b)` to `a.max(b)` for readability
+- maintain a utility module containing functions like `median()` and other
+  commonly used math utility functions to reduce the cognitive load of reading a
+  median implementation

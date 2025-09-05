@@ -18,6 +18,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
         spectro_tex_id: Option<usize>,
         spectro_version_seen: u64,
         cpu_rgba: Vec<u8>,
+        onset_tex_id: Option<usize>,
+        onset_version_seen: u64,
+        onset_rgba: Vec<u8>,
     }
 
     info!("ui started");
@@ -41,6 +44,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 spectro_tex_id: None,
                 spectro_version_seen: 0,
                 cpu_rgba: vec![0; (SPECTRO_BINS as usize) * (SPECTRO_COLS as usize) * 4],
+                onset_tex_id: None,
+                onset_version_seen: 0,
+                onset_rgba: Vec::new(),
             })
         },
         |ctx: &mut GpuContext,
@@ -57,7 +63,19 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             }
 
             // read shared measurements
-            let (bpm, _avg_rms, _last_beat_at, last_kick_at, spectro_ver, bins, cols, spectro_data) = {
+            let (
+                bpm,
+                _avg_rms,
+                _last_beat_at,
+                last_kick_at,
+                spectro_ver,
+                bins,
+                cols,
+                spectro_data,
+                _onset_ver,
+                onset_len,
+                onset_data,
+            ) = {
                 if let Ok(s) = shared.lock() {
                     (
                         s.current_bpm,
@@ -68,9 +86,12 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         s.spectrogram_dims().0 as u32,
                         s.spectrogram_dims().1 as u32,
                         s.spectrogram_data().clone(),
+                        s.onset_version,
+                        s.onset_dims(),
+                        s.onset_data().clone(),
                     )
                 } else {
-                    (0.0, 0.0, None, None, 0, SPECTRO_BINS, SPECTRO_COLS, Vec::new())
+                    (0.0, 0.0, None, None, 0, SPECTRO_BINS, SPECTRO_COLS, Vec::new(), 0, 0, Vec::new())
                 }
             };
             let now = Instant::now();
@@ -159,14 +180,55 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 Color::rgba(0.2, 0.5, 0.9, 0.25),
             );
 
-            // spectrogram square size
-            let square = 0.38 * w.min(h);
+            // spectrogram square size (bigger)
+            let square = 0.55 * w.min(h);
             let spec_x = center_x - square * 0.5;
             let spec_y = center_y + h * 0.08 - square * 0.5;
             if let Some(id) = state.spectro_tex_id {
                 let _ = state
                     .draw
                     .texture(spec_x, spec_y, square, square, id, Color::rgba(1.0, 1.0, 1.0, 1.0));
+            }
+
+            // onset graph below spectrogram: draw a filled polyline area
+            if onset_len > 0 && !onset_data.is_empty() {
+                // ensure onset texture exists (1px tall, stretched when drawn)
+                if state.onset_tex_id.is_none() {
+                    let tex_id = state.draw.create_texture_rgba8(onset_len as u32, 1);
+                    state.onset_tex_id = Some(tex_id);
+                    state.onset_rgba.resize(onset_len * 4, 0);
+                    state.onset_version_seen = 0;
+                }
+                // update onset texture if new data arrived
+                if state.onset_version_seen != _onset_ver {
+                    state.onset_rgba.resize(onset_len * 4, 0);
+                    for i in 0..onset_len {
+                        let v = onset_data[i].clamp(0.0, 1.0);
+                        // tint: teal-green scaled by intensity
+                        let r = (0.20 * v * 255.0) as u8;
+                        let g = (0.90 * v * 255.0) as u8;
+                        let b = (0.60 * v * 255.0) as u8;
+                        let o = i * 4;
+                        state.onset_rgba[o + 0] = r;
+                        state.onset_rgba[o + 1] = g;
+                        state.onset_rgba[o + 2] = b;
+                        state.onset_rgba[o + 3] = 255;
+                    }
+                    if let Some(id) = state.onset_tex_id {
+                        let _ = state.draw.update_texture_rgba8(id, &state.onset_rgba);
+                    }
+                    state.onset_version_seen = _onset_ver;
+                }
+                // draw stretched intensity strip
+                if let Some(id) = state.onset_tex_id {
+                    let graph_w = square;
+                    let graph_h = (square * 0.22).max(40.0);
+                    let gx = spec_x;
+                    let gy = spec_y + square + 10.0;
+                    let _ = state
+                        .draw
+                        .texture(gx, gy, graph_w, graph_h, id, Color::rgba(1.0, 1.0, 1.0, 1.0));
+                }
             }
 
             // bpm text in center
