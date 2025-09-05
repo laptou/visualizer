@@ -1,6 +1,6 @@
 use crate::app::{GpuContext, run_windowed};
 use crate::gfx::{Color, DrawContext};
-use crate::shared::{SharedState, SPECTRO_BINS, SPECTRO_COLS};
+use crate::shared::{SPECTRO_BINS, SPECTRO_COLS, SharedState};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
         onset_tex_id: Option<usize>,
         onset_version_seen: u64,
         onset_rgba: Vec<u8>,
+        uv_tex_id: Option<usize>,
     }
 
     info!("ui started");
@@ -47,6 +48,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 onset_tex_id: None,
                 onset_version_seen: 0,
                 onset_rgba: Vec::new(),
+                uv_tex_id: None,
             })
         },
         |ctx: &mut GpuContext,
@@ -91,7 +93,19 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         s.onset_data().clone(),
                     )
                 } else {
-                    (0.0, 0.0, None, None, 0, SPECTRO_BINS, SPECTRO_COLS, Vec::new(), 0, 0, Vec::new())
+                    (
+                        0.0,
+                        0.0,
+                        None,
+                        None,
+                        0,
+                        SPECTRO_BINS,
+                        SPECTRO_COLS,
+                        Vec::new(),
+                        0,
+                        0,
+                        Vec::new(),
+                    )
                 }
             };
             let now = Instant::now();
@@ -113,7 +127,12 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.04, g: 0.05, b: 0.06, a: 1.0 }),
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.04,
+                                g: 0.05,
+                                b: 0.06,
+                                a: 1.0,
+                            }),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -165,7 +184,9 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             let center_y = h * 0.5;
 
             // kick-synced big square behind spectrogram
-            let dt_kick = last_kick_at.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(10.0);
+            let dt_kick = last_kick_at
+                .map(|t| now.duration_since(t).as_secs_f32())
+                .unwrap_or(10.0);
             let t_norm = (dt_kick / 0.6).clamp(0.0, 1.0);
             let ease = (1.0 - t_norm).powi(2);
             let max_square = 0.7 * w.min(h);
@@ -184,10 +205,53 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             let square = 0.55 * w.min(h);
             let spec_x = center_x - square * 0.5;
             let spec_y = center_y + h * 0.08 - square * 0.5;
-            if let Some(id) = state.spectro_tex_id {
-                let _ = state
-                    .draw
-                    .texture(spec_x, spec_y, square, square, id, Color::rgba(1.0, 1.0, 1.0, 1.0));
+            // ensure uv texture exists and encode log-y, linear-x mapping in RG
+            if state.uv_tex_id.is_none() {
+                let uv_w = cols.max(1);
+                let uv_h = bins.max(1);
+                let uv_id = state.draw.create_texture_rgba8(uv_w, uv_h);
+                state.uv_tex_id = Some(uv_id);
+                // build uv cpu buffer: for each output (x,y), write src uv in 0..1
+                let mut buf = vec![0u8; (uv_w * uv_h * 4) as usize];
+                for y in 0..uv_h {
+                    let ty = y as f32 / (uv_h - 1).max(1) as f32;
+                    for x in 0..uv_w {
+                        let tx = x as f32 / (uv_w - 1).max(1) as f32;
+                        let u = (tx.clamp(0.0, 1.0) * 255.0) as u8;
+                        // compute logarithmic mapping: v = log10(1 + 9*ty)
+                        let log_v = (1.0 + 9.0 * ty).log10();
+                        let v = (log_v.clamp(0.0, 1.0) * 255.0) as u8;
+                        let o = ((y * uv_w + x) * 4) as usize;
+                        buf[o + 0] = u; // R = u
+                        buf[o + 1] = v; // G = v
+                        buf[o + 2] = 0;
+                        buf[o + 3] = 255;
+                    }
+                }
+                if let Some(id) = state.uv_tex_id {
+                    let _ = state.draw.update_texture_rgba8(id, &buf);
+                }
+            }
+
+            if let (Some(src), Some(uv)) = (state.spectro_tex_id, state.uv_tex_id) {
+                let _ = state.draw.texture_with_uv(
+                    spec_x,
+                    spec_y,
+                    square,
+                    square,
+                    src,
+                    uv,
+                    Color::rgba(1.0, 1.0, 1.0, 1.0),
+                );
+
+                let _ = state.draw.texture(
+                    spec_x,
+                    spec_y,
+                    square,
+                    square,
+                    uv,
+                    Color::rgba(1.0, 1.0, 1.0, 1.0),
+                );
             }
 
             // onset graph below spectrogram: draw a filled polyline area
@@ -225,9 +289,14 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     let graph_h = (square * 0.22).max(40.0);
                     let gx = spec_x;
                     let gy = spec_y + square + 10.0;
-                    let _ = state
-                        .draw
-                        .texture(gx, gy, graph_w, graph_h, id, Color::rgba(1.0, 1.0, 1.0, 1.0));
+                    let _ = state.draw.texture(
+                        gx,
+                        gy,
+                        graph_w,
+                        graph_h,
+                        id,
+                        Color::rgba(1.0, 1.0, 1.0, 1.0),
+                    );
                 }
             }
 

@@ -157,19 +157,31 @@ impl AudioProcessor {
 
         // push spectrogram slice and track kick from low-band flux
         if let Ok(mut s) = self.shared.lock() {
-            // remap spectro_slice (linear in frequency) to log-spaced bins
+            // map spectro_slice linearly to SPECTRO_BINS (no log remap; UV shader will handle mapping)
             let bins = SPECTRO_BINS as usize;
             let src = &spectro_slice;
             let src_len = src.len();
             let mut tmp = vec![0.0f32; bins];
-            let f_min = 20.0f32;
-            let f_max = (self.sample_rate as f32) * 0.5;
-            let bin_hz = self.sample_rate as f32 / BUFFER_SIZE as f32;
-            for b in 0..bins {
-                let t = b as f32 / (bins - 1).max(1) as f32;
-                let f = f_min * (f_max / f_min).powf(t);
-                let idx = (f / bin_hz).round() as usize;
-                tmp[b] = src[idx.min(src_len - 1)];
+            if bins <= src_len {
+                let block = src_len as f32 / bins as f32;
+                for b in 0..bins {
+                    let start = (b as f32 * block).floor() as usize;
+                    let end = ((b as f32 + 1.0) * block).ceil() as usize;
+                    let end = end.min(src_len);
+                    let start = start.min(end);
+                    let mut sum = 0.0;
+                    let mut cnt = 0;
+                    for i in start..end {
+                        sum += src[i];
+                        cnt += 1;
+                    }
+                    tmp[b] = if cnt > 0 { sum / cnt as f32 } else { 0.0 };
+                }
+            } else {
+                for b in 0..bins {
+                    let i = ((b as f32 / bins as f32) * src_len as f32).floor() as usize;
+                    tmp[b] = src[i.min(src_len - 1)];
+                }
             }
             s.push_spectrogram_slice(&tmp);
             // push normalized onset for graph (normalize by dynamic baseline)

@@ -111,6 +111,15 @@ pub enum DrawOp {
         tex_id: usize,
         color: Color,
     },
+    TextureUV {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        src_tex_id: usize,
+        uv_tex_id: usize,
+        color: Color,
+    },
     Layer {
         options: LayerOptions,
         ops: Vec<DrawOp>,
@@ -190,6 +199,11 @@ pub struct DrawContext {
     pipeline_texture_stencil: wgpu::RenderPipeline,
     textures: Vec<TextureResource>,
 
+    // uv remap: separate shader and pipeline with two sampled textures
+    uv_bind_group_layout: BindGroupLayout,
+    pipeline_texture_uv: wgpu::RenderPipeline,
+    pipeline_texture_uv_stencil: wgpu::RenderPipeline,
+
     // text subsystem (glyphon/cosmic-text)
     cache: Cache,
     font_system: CtFontSystem,
@@ -228,6 +242,12 @@ impl DrawContext {
         let tex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("drawcontext texture shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(tex_shader_src)),
+        });
+        // uv-remap shader (samples uv coords from a second texture)
+        let tex_uv_shader_src = include_str!("shaders/texture_uv.wgsl");
+        let tex_uv_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("drawcontext texture uv shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(tex_uv_shader_src)),
         });
 
         // uniform for screen size
@@ -291,6 +311,21 @@ impl DrawContext {
         let pipeline_layout_tex = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("drawcontext texture pipeline layout"),
             bind_group_layouts: &[&screen_bind_group_layout, &texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // uv bind group: sampler + source texture + uv texture (rgba where rg=uv)
+        let uv_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture uv bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } }, count: None },
+            ],
+        });
+        let pipeline_layout_tex_uv = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("drawcontext texture uv pipeline layout"),
+            bind_group_layouts: &[&screen_bind_group_layout, &uv_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -395,6 +430,24 @@ impl DrawContext {
             true,
         );
 
+        // texture+uv pipelines
+        let pipeline_texture_uv = create_texture_pipeline(
+            device,
+            &pipeline_layout_tex_uv,
+            &tex_uv_shader,
+            format,
+            &vertex_layout_tex,
+            false,
+        );
+        let pipeline_texture_uv_stencil = create_texture_pipeline(
+            device,
+            &pipeline_layout_tex_uv,
+            &tex_uv_shader,
+            format,
+            &vertex_layout_tex,
+            true,
+        );
+
         // text: cache, atlas, renderer, viewport
         let cache = Cache::new(device);
         let mut text_atlas = TextAtlas::new(device, queue, &cache, format);
@@ -462,6 +515,9 @@ impl DrawContext {
             pipeline_texture,
             pipeline_texture_stencil,
             textures: Vec::new(),
+            uv_bind_group_layout,
+            pipeline_texture_uv,
+            pipeline_texture_uv_stencil,
             cache,
             font_system: CtFontSystem::new(),
             swash_cache: CtSwashCache::new(),
@@ -613,6 +669,12 @@ impl DrawContext {
         Ok(())
     }
 
+    /// draw a textured quad with uv-remap, sampling source using coordinates in uv texture (rg channels)
+    pub fn texture_with_uv(&mut self, x: f32, y: f32, w: f32, h: f32, src_tex_id: usize, uv_tex_id: usize, color: Color) -> Result<()> {
+        self.ops.push(DrawOp::TextureUV { x, y, w, h, src_tex_id, uv_tex_id, color });
+        Ok(())
+    }
+
     /// translate buffered operations into wgpu commands and execute them in submission order.
     ///
     /// the renderer preserves the order that `rect`, `polygon`, `text`, and `layer` calls were made.
@@ -653,6 +715,13 @@ impl DrawContext {
                 vertices: Vec<GpuVertexTex>,
                 indices: Vec<u32>,
                 tex_id: usize,
+                clipped: bool,
+            },
+            DrawTextureUV {
+                vertices: Vec<GpuVertexTex>,
+                indices: Vec<u32>,
+                src_tex_id: usize,
+                uv_tex_id: usize,
                 clipped: bool,
             },
         }
@@ -756,6 +825,17 @@ impl DrawContext {
                         ];
                         let i = vec![0u32, 1, 2, 0, 2, 3];
                         steps.push(Step::DrawTexture { vertices: v, indices: i, tex_id, clipped: cur_ctx.clipped });
+                    }
+                    DrawOp::TextureUV { x, y, w, h, src_tex_id, uv_tex_id, color } => {
+                        let z = cur_ctx.z;
+                        let v = vec![
+                            GpuVertexTex { pos: [x, y, z], uv: [0.0, 0.0], color: color.to_array() },
+                            GpuVertexTex { pos: [x + w, y, z], uv: [1.0, 0.0], color: color.to_array() },
+                            GpuVertexTex { pos: [x + w, y + h, z], uv: [1.0, 1.0], color: color.to_array() },
+                            GpuVertexTex { pos: [x, y + h, z], uv: [0.0, 1.0], color: color.to_array() },
+                        ];
+                        let i = vec![0u32, 1, 2, 0, 2, 3];
+                        steps.push(Step::DrawTextureUV { vertices: v, indices: i, src_tex_id, uv_tex_id, clipped: cur_ctx.clipped });
                     }
                     DrawOp::Text { x, y, text, opts } => {
                         // build buffer; prepare during execution to avoid lifetimes
@@ -1036,6 +1116,30 @@ impl DrawContext {
                         rpass.set_pipeline(pipe);
                         rpass.set_bind_group(0, &self.screen_bind_group, &[]);
                         rpass.set_bind_group(1, &tex.bind_group, &[]);
+                        rpass.set_vertex_buffer(0, vbuf.slice(..));
+                        rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        rpass.draw_indexed(0..icount, 0, 0..1);
+                    }
+                }
+                Step::DrawTextureUV { vertices, indices, src_tex_id, uv_tex_id, clipped } => {
+                    if let (Some(src), Some(uv)) = (self.textures.get(src_tex_id), self.textures.get(uv_tex_id)) {
+                        // build a combined bind group dynamically for src+uv using the uv layout
+                        let (vbuf, ibuf, icount) = self.upload_tex(vertices, indices);
+                        let pipe = if clipped { &self.pipeline_texture_uv_stencil } else { &self.pipeline_texture_uv };
+                        if clipped { rpass.set_stencil_reference(1); }
+                        // create a transient bind group coupling the sampler with src and uv views
+                        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("im2d tex uv bg transient"),
+                            layout: &self.uv_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&src.sampler) },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&src.view) },
+                                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&uv.view) },
+                            ],
+                        });
+                        rpass.set_pipeline(pipe);
+                        rpass.set_bind_group(0, &self.screen_bind_group, &[]);
+                        rpass.set_bind_group(1, &bg, &[]);
                         rpass.set_vertex_buffer(0, vbuf.slice(..));
                         rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
                         rpass.draw_indexed(0..icount, 0, 0..1);
