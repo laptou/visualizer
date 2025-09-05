@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod cli;
 pub mod gfx;
+pub mod utils;
 // re-export for macro without making users depend on lyon directly
 pub use lyon_geom as __vzr_lyon_geom;
 pub use lyon_path as __vzr_lyon_path;

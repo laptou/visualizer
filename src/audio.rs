@@ -1,4 +1,5 @@
 use crate::shared::{SharedState, SPECTRO_BINS};
+use crate::utils::median;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
@@ -6,6 +7,7 @@ use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::cmp::min;
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, trace};
@@ -148,9 +150,8 @@ impl AudioProcessor {
         // on strong onset: mark a beat timestamp
         if self.onset_history.len() >= 16 {
             // compute median baseline from recent history (excluding the just-pushed value would be similar)
-            let mut slice: Vec<f32> = self.onset_history.iter().copied().collect();
-            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let median = slice[slice.len() / 2].max(1e-6);
+            let slice: Vec<f32> = self.onset_history.iter().copied().collect();
+            let median = f32::max(median(slice), 1e-6);
             let is_peak = onset_strength > ONSET_PEAK_RATIO * median && onset_strength > prev_last;
             if is_peak {
                 self.last_beat_at = Some(Instant::now());
@@ -168,10 +169,10 @@ impl AudioProcessor {
             if bins <= src_len {
                 let block = src_len as f32 / bins as f32;
                 for b in 0..bins {
-                    let start = (b as f32 * block).floor() as usize;
-                    let end = ((b as f32 + 1.0) * block).ceil() as usize;
-                    let end = end.min(src_len);
-                    let start = start.min(end);
+                    let start = f32::floor(b as f32 * block) as usize;
+                    let end = f32::ceil((b as f32 + 1.0) * block) as usize;
+                    let end = min(end, src_len);
+                    let start = min(start, end);
                     let mut sum = 0.0;
                     let mut cnt = 0;
                     for i in start..end {
@@ -182,20 +183,19 @@ impl AudioProcessor {
                 }
             } else {
                 for b in 0..bins {
-                    let i = ((b as f32 / bins as f32) * src_len as f32).floor() as usize;
-                    tmp[b] = src[i.min(src_len - 1)];
+                    let i = f32::floor((b as f32 / bins as f32) * src_len as f32) as usize;
+                    tmp[b] = src[min(i, src_len - 1)];
                 }
             }
             s.push_spectrogram_slice(&tmp);
             // compute a small baseline from recent history
-            let mut slice: Vec<f32> = self.onset_history.iter().copied().collect();
-            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let med = if !slice.is_empty() { slice[slice.len() / 2] } else { 1e-6 };
+            let slice: Vec<f32> = self.onset_history.iter().copied().collect();
+            let med = if !slice.is_empty() { median(slice) } else { 1e-6 };
             // push normalized onset for graph (normalize by dynamic baseline)
-            let norm = f32::clamp(onset_strength / med.max(1e-6), 0.0, 4.0) / 4.0;
+            let norm = f32::clamp(onset_strength / f32::max(med, 1e-6), 0.0, 4.0) / 4.0;
             s.push_onset(norm);
             // derive low-frequency onset normalization using a fraction of median as baseline
-            let low_baseline = 0.5 * med.max(1e-6);
+            let low_baseline = 0.5 * f32::max(med, 1e-6);
             let norm_low = f32::clamp(lowband_flux / low_baseline, 0.0, 4.0) / 4.0;
             s.push_low_onset(norm_low);
         }
@@ -204,9 +204,8 @@ impl AudioProcessor {
         // keep a small ring buffer of recent lowband fluxes using onset_history for simplicity
         // here we just re-use the same thresholding as above but on lowband_flux
         if self.onset_history.len() >= 16 {
-            let mut slice: Vec<f32> = self.onset_history.iter().copied().collect();
-            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let median_full = slice[slice.len() / 2].max(1e-6);
+            let slice: Vec<f32> = self.onset_history.iter().copied().collect();
+            let median_full = f32::max(median(slice), 1e-6);
             // derive a rough lowband baseline as some fraction of full median
             // this is a heuristic to avoid an extra buffer; if lowband flux is very high vs baseline, mark kick
             let baseline = 0.5 * median_full;
@@ -248,10 +247,13 @@ impl AudioProcessor {
             .map(|(k, &m)| {
                 let f = k as f32 * bin_hz + FREQ_EPS;
                 let low_w = 1.0 / (1.0 + (f / LOW_EMPH_FC).powi(2));
-                let high_ratio = (f / HIGH_ALLOW_FC).max(0.0);
-                let high_w =
-                    (HIGH_ALLOW_GAIN * high_ratio / (1.0 + high_ratio)).clamp(0.0, HIGH_ALLOW_GAIN);
-                let w = (low_w + high_w).clamp(0.0, 1.0);
+                let high_ratio = f32::max(f / HIGH_ALLOW_FC, 0.0);
+                let high_w = f32::clamp(
+                    HIGH_ALLOW_GAIN * high_ratio / (1.0 + high_ratio),
+                    0.0,
+                    HIGH_ALLOW_GAIN,
+                );
+                let w = f32::clamp(low_w + high_w, 0.0, 1.0);
                 m * w
             })
             .collect();
@@ -259,30 +261,30 @@ impl AudioProcessor {
         let spectral_flux: f32 = weighted
             .iter()
             .zip(self.prev_weighted_magnitudes.iter())
-            .map(|(&current, &previous)| (current - previous).max(0.0))
+            .map(|(&current, &previous)| f32::max(current - previous, 0.0))
             .sum();
         // low-band-only flux for kick detection
-        let max_low_bin = ((KICK_BAND_MAX_HZ / bin_hz) as usize).min(weighted.len());
+        let max_low_bin = min((KICK_BAND_MAX_HZ / bin_hz) as usize, weighted.len());
         let lowband_flux: f32 = weighted
             [0..max_low_bin]
             .iter()
             .zip(self.prev_weighted_magnitudes[0..max_low_bin].iter())
-            .map(|(&current, &previous)| (current - previous).max(0.0))
+            .map(|(&current, &previous)| f32::max(current - previous, 0.0))
             .sum();
 
         // build a spectrogram slice from weighted magnitudes with simple dynamic range mapping
         // truncate to <= 8khz so we spend vertical resolution on lows/mids
         let max_bin_inclusive = {
-            let max_bin = (SPECTRO_MAX_HZ / bin_hz).floor() as usize;
+            let max_bin = f32::floor(SPECTRO_MAX_HZ / bin_hz) as usize;
             // clamp within computed spectrum size
-            std::cmp::min(max_bin, weighted.len().saturating_sub(1))
+            min(max_bin, weighted.len().saturating_sub(1))
         };
         let slice: Vec<f32> = weighted
             .iter()
             .take(max_bin_inclusive + 1)
             .map(|&v| {
-                let v = v.max(0.0);
-                let v = (v / 50.0).min(1.0); // simple scale; tuned empirically
+                let v = f32::max(v, 0.0);
+                let v = f32::min(v / 50.0, 1.0); // simple scale; tuned empirically
                 v
             })
             .collect();
@@ -302,10 +304,10 @@ impl AudioProcessor {
         let mut peak_lag = 1;
 
         let hop_seconds = self.hop_size as f32 / self.sample_rate as f32;
-        let min_lag = (60.0 / BPM_MAX / hop_seconds).round().max(1.0) as usize;
+        let min_lag = f32::max(f32::round(60.0 / BPM_MAX / hop_seconds), 1.0) as usize;
         let max_lag = (60.0 / BPM_MIN / hop_seconds).round() as usize;
-        let search_end = max_lag.min(autocorr.len());
-        let search_start = min_lag.min(search_end);
+        let search_end = min(max_lag, autocorr.len());
+        let search_start = min(min_lag, search_end);
         trace!(
             "diag: bpm search lags={}..{}, hop_seconds={:.6}",
             search_start, search_end, hop_seconds
@@ -330,12 +332,11 @@ impl AudioProcessor {
             folded /= 2.0;
         }
 
-        let end = max_lag.min(autocorr.len());
-        let start = min_lag.min(end);
+        let end = min(max_lag, autocorr.len());
+        let start = min(min_lag, end);
         let baseline_median = if end > start + 2 {
-            let mut slice: Vec<f32> = autocorr[start..end].to_vec();
-            slice.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            slice[slice.len() / 2]
+            let slice: Vec<f32> = autocorr[start..end].to_vec();
+            median(slice)
         } else {
             0.0
         };
@@ -351,9 +352,7 @@ impl AudioProcessor {
                 self.bpm_history.pop_front();
             }
             let median = if self.bpm_history.len() >= 3 {
-                let mut sorted_bpm: Vec<f32> = self.bpm_history.iter().copied().collect();
-                sorted_bpm.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                sorted_bpm[sorted_bpm.len() / 2]
+                median(self.bpm_history.iter().copied().collect())
             } else {
                 folded
             };

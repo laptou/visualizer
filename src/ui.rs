@@ -180,7 +180,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     let src_off = src_row * cols_usize;
                     let dst_off = b * cols_usize * 4;
                     for c in 0..cols_usize {
-                        let v = spectro_data[src_off + c].clamp(0.0, 1.0);
+                        let v = f32::clamp(spectro_data[src_off + c], 0.0, 1.0);
                         let g = (v * 255.0) as u8;
                         let i = dst_off + c * 4;
                         state.cpu_rgba[i + 0] = g; // r
@@ -274,7 +274,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 if state.onset_version_seen != _onset_ver {
                     state.onset_rgba.resize(onset_len * 4, 0);
                     for i in 0..onset_len {
-                        let v = onset_data[i].clamp(0.0, 1.0);
+                        let v = f32::clamp(onset_data[i], 0.0, 1.0);
                         // log-scale brightness: small values show up more, big values compress
                         let l = f32::clamp((1.0 + 9.0 * v).log10(), 0.0, 1.0);
                         // tint: teal-green scaled by log intensity
@@ -295,7 +295,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 // draw stretched intensity strip
                 if let Some(id) = state.onset_tex_id {
                     let graph_w = square;
-                    let graph_h = (square * 0.18).max(36.0);
+                    let graph_h = f32::max(square * 0.18, 36.0);
                     let gx = spec_x;
                     let gy = spec_y + square + 10.0;
                     let _ = state.draw.texture(
@@ -320,7 +320,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 if state.low_onset_version_seen != _low_onset_ver {
                     state.low_onset_rgba.resize(low_onset_len * 4, 0);
                     for i in 0..low_onset_len {
-                        let v = low_onset_data[i].clamp(0.0, 1.0);
+                        let v = f32::clamp(low_onset_data[i], 0.0, 1.0);
                         // log-scale brightness for low-band
                         let l = f32::clamp((1.0 + 9.0 * v).log10(), 0.0, 1.0);
                         // tint: amber for low-frequency onsets
@@ -340,10 +340,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 }
                 if let Some(id) = state.low_onset_tex_id {
                     let graph_w = square;
-                    let graph_h = (square * 0.18).max(36.0);
+                    let graph_h = f32::max(square * 0.18, 36.0);
                     let gx = spec_x;
                     // place below the main onset graph with small gap
-                    let gy = spec_y + square + 10.0 + (square * 0.18).max(36.0) + 6.0;
+                    let gy = spec_y + square + 10.0 + f32::max(square * 0.18, 36.0) + 6.0;
                     let _ = state.draw.texture(
                         gx,
                         gy,
@@ -366,7 +366,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 center_y - square * 0.55,
                 &label,
                 crate::gfx::TextOptions {
-                    px: f32::clamp(w.min(h) * 0.12, 28.0, 128.0),
+                    px: f32::clamp(f32::min(w, h) * 0.12, 28.0, 128.0),
                     color: Color::rgba(1.0, 1.0, 1.0, 1.0),
                     halign: crate::gfx::TextHAlign::Center,
                     valign: crate::gfx::TextVAlign::Middle,

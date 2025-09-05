@@ -734,7 +734,7 @@ impl DrawContext {
             clipped: bool,
         }
         fn map_z_index(z_index: i32) -> f32 {
-            (0.5f32 - (z_index as f32) * 0.001).clamp(0.0, 1.0)
+            f32::clamp(0.5f32 - (z_index as f32) * 0.001, 0.0, 1.0)
         }
 
         let mut steps: Vec<Step> = Vec::new();
@@ -858,7 +858,7 @@ impl DrawContext {
                             // measure to apply alignment
                             let mut width_px: f32 = 0.0;
                             for run in b.layout_runs() {
-                                width_px = width_px.max(run.line_w);
+                                width_px = f32::max(width_px, run.line_w);
                             }
                             // cosmic-text Metrics doesn't expose ascent directly; approximate using font size
                             let ascender_px: f32 = b.metrics().font_size;
@@ -875,7 +875,7 @@ impl DrawContext {
                                 TextVAlign::Baseline => y - ascender_px,
                             };
                         }
-                        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        let to_u8 = |v: f32| f32::round(f32::clamp(v, 0.0, 1.0) * 255.0) as u8;
                         let ct_color = CtColor::rgba(
                             to_u8(opts.color.r),
                             to_u8(opts.color.g),
