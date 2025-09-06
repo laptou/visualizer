@@ -29,3 +29,21 @@ pub fn clamp01(x: f32) -> f32 {
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
+
+/// downsample a spectrum by averaging groups of `group_size` bins
+/// note: last partial group is averaged over its actual length
+pub fn downsample_average(values: &[f32], group_size: usize) -> Vec<f32> {
+    if values.is_empty() || group_size == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity((values.len() + group_size - 1) / group_size);
+    let mut i = 0;
+    while i < values.len() {
+        let end = std::cmp::min(i + group_size, values.len());
+        let sum: f32 = values[i..end].iter().copied().sum();
+        let avg = sum / (end - i) as f32;
+        out.push(avg);
+        i = end;
+    }
+    out
+}

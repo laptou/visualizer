@@ -1,5 +1,5 @@
 use crate::shared::{SPECTRO_BINS, SharedState};
-use crate::utils::median;
+use crate::utils::{median, downsample_average};
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use tracing::{error, info, trace};
 
 // configuration constants for audio processing
-const BUFFER_SIZE: usize = 1024; // fft window size
-const HOP_SIZE: usize = 512; // analysis hop size (50% overlap)
+const BUFFER_SIZE: usize = 2048; // fft window size (larger window for better frequency resolution)
+const HOP_SIZE: usize = 1024; // analysis hop size (50% overlap)
 const ONSET_HISTORY_SIZE: usize = 128; // number of onset strength values to keep for bpm calculation
 const SILENCE_THRESHOLD: f32 = 0.001; // rms threshold below which audio is considered silence
 const BPM_SMOOTHING_WINDOW: usize = 21; // median smoothing window for bpm
@@ -26,7 +26,7 @@ const BPM_MIN_CONFIDENCE_RATIO: f32 = 1.8; // min peak/median ratio to accept bp
 // onset detection thresholding
 const ONSET_PEAK_RATIO: f32 = 2.5; // how strong onset must be vs median to count as beat
 const KICK_PEAK_RATIO: f32 = 3.0; // how strong low-band onset must be vs median to count as kick
-const KICK_BAND_MAX_HZ: f32 = 150.0; // low-frequency band upper bound for kick detection
+const KICK_BAND_MAX_HZ: f32 = 200.0; // low-frequency band upper bound for kick detection
 
 // frequency weighting for onset detection
 const LOW_EMPH_FC: f32 = 300.0; // corner frequency for low boost
@@ -63,7 +63,7 @@ impl AudioProcessor {
             last_bpm_print: Instant::now(),
             current_bpm: 0.0,
             bpm_history: VecDeque::with_capacity(BPM_SMOOTHING_WINDOW),
-            prev_weighted_magnitudes: vec![0.0; BUFFER_SIZE / 2],
+            prev_weighted_magnitudes: vec![0.0; BUFFER_SIZE / 4],
             rms_history: VecDeque::with_capacity(10),
             sample_rate,
             hop_size,
@@ -262,16 +262,26 @@ impl AudioProcessor {
             })
             .collect();
 
-        let spectral_flux: f32 = weighted
+        // downsample frequency bins to reduce micro-shifts smearing onsets
+        let ds_group = 4; // average every 2 bins -> halves resolution
+        let weighted_ds = downsample_average(&weighted, ds_group);
+
+        // ensure prev buffer length matches
+        if self.prev_weighted_magnitudes.len() != weighted_ds.len() {
+            self.prev_weighted_magnitudes = vec![0.0; weighted_ds.len()];
+        }
+
+        let spectral_flux: f32 = weighted_ds
             .iter()
             .zip(self.prev_weighted_magnitudes.iter())
             .map(|(&current, &previous)| f32::max(current - previous, 0.0))
             .sum();
-        // low-band-only flux for kick detection
-        let max_low_bin = min((KICK_BAND_MAX_HZ / bin_hz) as usize, weighted.len());
-        let lowband_flux: f32 = weighted[0..max_low_bin]
+        // low-band-only flux for kick detection (map cutoff to downsampled index)
+        let max_low_bin_full = min((KICK_BAND_MAX_HZ / bin_hz) as usize, weighted.len());
+        let max_low_bin_ds = min((max_low_bin_full + ds_group - 1) / ds_group, weighted_ds.len());
+        let lowband_flux: f32 = weighted_ds[0..max_low_bin_ds]
             .iter()
-            .zip(self.prev_weighted_magnitudes[0..max_low_bin].iter())
+            .zip(self.prev_weighted_magnitudes[0..max_low_bin_ds].iter())
             .map(|(&current, &previous)| f32::max(current - previous, 0.0))
             .sum();
 
@@ -292,7 +302,7 @@ impl AudioProcessor {
             })
             .collect();
 
-        self.prev_weighted_magnitudes.copy_from_slice(&weighted);
+        self.prev_weighted_magnitudes.copy_from_slice(&weighted_ds);
         (spectral_flux, slice, lowband_flux)
     }
 

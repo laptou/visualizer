@@ -205,7 +205,8 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             let max_square = 0.7 * f32::min(w, h);
             let kick_size = (0.2 * max_square) + ease * (0.8 * max_square);
             let kick_x = center_x - kick_size * 0.5;
-            let kick_y = center_y + h * 0.08 - kick_size * 0.5; // slightly below true center to make room for text
+            // shift up slightly to make room for wider charts
+            let kick_y = center_y + h * 0.02 - kick_size * 0.5; // slightly below true center to make room for text
             let _ = state.draw.rect(
                 kick_x,
                 kick_y,
@@ -217,7 +218,8 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             // spectrogram square size (bigger)
             let square = 0.55 * f32::min(w, h);
             let spec_x = center_x - square * 0.5;
-            let spec_y = center_y + h * 0.08 - square * 0.5;
+            // move spectrogram up a bit
+            let spec_y = center_y + h * 0.02 - square * 0.5;
             // ensure uv texture exists and encode log-y, linear-x mapping in RG
             if state.uv_tex_id.is_none() {
                 let uv_w = max(cols, 1);
@@ -280,9 +282,10 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     state.onset_version_seen = onset_ver;
                 }
                 if let Some(chart) = &mut state.onset_chart {
-                    let graph_w = square;
+                    // make chart wider and center it horizontally; keep a small margin
+                    let graph_w = f32::min(w * 0.9, square * 1.6);
                     let graph_h = f32::max(square * 0.18, 36.0);
-                    let gx = spec_x;
+                    let gx = center_x - graph_w * 0.5;
                     let gy = spec_y + square + 10.0;
                     let _ = chart.render(&mut state.draw, gx, gy, graph_w, graph_h);
                 }
@@ -310,11 +313,12 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     state.low_onset_version_seen = low_onset_ver;
                 }
                 if let Some(chart) = &mut state.low_onset_chart {
-                    let graph_w = square;
+                    // match width with the main onset chart and center
+                    let graph_w = f32::min(w * 0.9, square * 1.6);
                     let graph_h = f32::max(square * 0.18, 36.0);
-                    let gx = spec_x;
+                    let gx = center_x - graph_w * 0.5;
                     // place below the main onset graph with small gap
-                    let gy = spec_y + square + 10.0 + f32::max(square * 0.18, 36.0) + 6.0;
+                    let gy = spec_y + square + 10.0 + graph_h + 6.0;
                     let _ = chart.render(&mut state.draw, gx, gy, graph_w, graph_h);
                 }
             }
@@ -327,7 +331,8 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             };
             state.draw.text_with(
                 center_x,
-                center_y - square * 0.55,
+                // move text slightly higher to compensate overall upward shift
+                center_y - square * 0.60,
                 &label,
                 crate::gfx::TextOptions {
                     px: f32::clamp(f32::min(w, h) * 0.12, 28.0, 128.0),
