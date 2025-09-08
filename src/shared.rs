@@ -35,6 +35,9 @@ pub struct SharedState {
     low_onset: Vec<f32>,
     /// version bump whenever a new low onset value is pushed
     pub low_onset_version: u64,
+
+    /// debug: beat detection metrics for diagnostics
+    pub debug: BeatDebug,
 }
 
 impl SharedState {
@@ -58,6 +61,7 @@ impl SharedState {
             low_onset_len: spectro_cols,
             low_onset: vec![0.0; spectro_cols],
             low_onset_version: 0,
+            debug: BeatDebug::default(),
         }
     }
 
@@ -139,6 +143,55 @@ impl SharedState {
     }
     pub fn low_onset_data(&self) -> &Vec<f32> {
         &self.low_onset
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BeatDebug {
+    /// current frame band energies [bass, lowmid]
+    pub energies: [f32; 2],
+    /// rolling averages [bass, lowmid]
+    pub avgs: [f32; 2],
+    /// rolling variances [bass, lowmid]
+    pub vars: [f32; 2],
+    /// thresholds computed from variance relation [bass, lowmid]
+    pub thrs: [f32; 2],
+    /// detection flags
+    pub detected_bass: bool,
+    pub detected_lowmid: bool,
+}
+
+impl Default for BeatDebug {
+    fn default() -> Self {
+        Self {
+            energies: [0.0, 0.0],
+            avgs: [0.0, 0.0],
+            vars: [0.0, 0.0],
+            thrs: [0.0, 0.0],
+            detected_bass: false,
+            detected_lowmid: false,
+        }
+    }
+}
+
+impl SharedState {
+    /// set beat debug values; called from audio thread
+    pub fn set_beat_debug(
+        &mut self,
+        energies: [f32; 2],
+        avgs: [f32; 2],
+        vars: [f32; 2],
+        thrs: [f32; 2],
+        detected_bass: bool,
+        detected_lowmid: bool,
+    ) {
+        self.debug.energies = energies;
+        self.debug.avgs = avgs;
+        self.debug.vars = vars;
+        self.debug.thrs = thrs;
+        self.debug.detected_bass = detected_bass;
+        self.debug.detected_lowmid = detected_lowmid;
+        self.last_update = Instant::now();
     }
 }
 

@@ -71,7 +71,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             // read shared measurements
             let (
                 bpm,
-                _avg_rms,
+                avg_rms,
                 _last_beat_at,
                 last_kick_at,
                 spectro_ver,
@@ -84,6 +84,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                 low_onset_ver,
                 low_onset_len,
                 low_onset_data,
+                dbg,
             ) = {
                 if let Ok(s) = shared.lock() {
                     (
@@ -101,6 +102,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         s.low_onset_version,
                         s.low_onset_dims(),
                         s.low_onset_data().clone(),
+                        s.debug,
                     )
                 } else {
                     (
@@ -118,6 +120,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                         0,
                         0,
                         Vec::new(),
+                        crate::shared::BeatDebug::default(),
                     )
                 }
             };
@@ -321,6 +324,63 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
                     let gy = spec_y + square + 10.0 + graph_h + 6.0;
                     let _ = chart.render(&mut state.draw, gx, gy, graph_w, graph_h);
                 }
+            }
+
+            // diagnostics panel (top-left)
+            {
+                let pad = 10.0;
+                let panel_w = f32::min(w * 0.45, 360.0);
+                let panel_h = 138.0;
+                let px = pad;
+                let py = pad;
+                let _ = state.draw.rect(px, py, panel_w, panel_h, Color::rgba(0.0, 0.0, 0.0, 0.35));
+                let line_h = 16.0;
+                let mut y = py + 8.0;
+                let x = px + 10.0;
+                let label = format!(
+                    "rms {:.4} | bass e {:.4} μ {:.4} σ² {:.4} thr {:.4} {} | lowmid e {:.4} μ {:.4} σ² {:.4} thr {:.4} {}",
+                    avg_rms,
+                    dbg.energies[0], dbg.avgs[0], dbg.vars[0], dbg.thrs[0], if dbg.detected_bass { "*" } else { "" },
+                    dbg.energies[1], dbg.avgs[1], dbg.vars[1], dbg.thrs[1], if dbg.detected_lowmid { "*" } else { "" },
+                );
+                state.draw.text_with(
+                    x,
+                    y,
+                    &label,
+                    crate::gfx::TextOptions {
+                        px: 14.0,
+                        color: Color::rgba(1.0, 1.0, 1.0, 0.95),
+                        halign: crate::gfx::TextHAlign::Left,
+                        valign: crate::gfx::TextVAlign::Top,
+                        ..Default::default()
+                    },
+                );
+                y += line_h;
+
+                // tiny bar meters for energy vs threshold
+                let bar_w = panel_w - 20.0;
+                let bar_h = 10.0;
+                let draw_bar = |draw: &mut DrawContext, bx: f32, by: f32, w: f32, h: f32, v: f32, thr: f32, color: Color| {
+                    let _ = draw.rect(bx, by, w, h, Color::rgba(0.2, 0.2, 0.2, 0.8));
+                    let val = f32::clamp(v, 0.0, 1.0);
+                    let thrv = f32::clamp(thr, 0.0, 1.0);
+                    let _ = draw.rect(bx, by, w * val, h, color);
+                    // threshold marker line
+                    let tx = bx + w * thrv;
+                    let _ = draw.rect(tx - 1.0, by, 2.0, h, Color::rgba(1.0, 1.0, 1.0, 0.9));
+                };
+                draw_bar(&mut state.draw, x, y, bar_w, bar_h, dbg.energies[0], dbg.thrs[0], Color::rgba(0.20, 0.70, 0.95, 0.9));
+                y += bar_h + 6.0;
+                draw_bar(&mut state.draw, x, y, bar_w, bar_h, dbg.energies[1], dbg.thrs[1], Color::rgba(0.95, 0.55, 0.20, 0.9));
+                y += bar_h + 6.0;
+
+                // refractory indicator
+                let kick_age = last_kick_at.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(10.0);
+                let refractory = if bpm > 0.0 { 15.0 / bpm } else { 0.1 };
+                let ref_fill = f32::clamp(1.0 - kick_age / refractory, 0.0, 1.0);
+                let _ = state.draw.rect(x, y, bar_w, bar_h, Color::rgba(0.2, 0.2, 0.2, 0.8));
+                let _ = state.draw.rect(x, y, bar_w * ref_fill, bar_h, Color::rgba(0.9, 0.25, 0.25, 0.9));
+                y += bar_h + 4.0;
             }
 
             // bpm text in center
