@@ -204,7 +204,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
             let ease = (1.0 - t_norm).powi(2);
             let max_square = 0.7 * f32::min(w, h);
             let kick_size = (0.2 * max_square) + ease * (0.8 * max_square);
-            let kick_x = center_x - kick_size * 0.5;
+            let kick_x = center_x - w * 0.2 - kick_size * 0.5;
             // shift up slightly to make room for wider charts
             let kick_y = center_y + h * 0.02 - kick_size * 0.5; // slightly below true center to make room for text
             let _ = state.draw.rect(
@@ -217,7 +217,7 @@ pub async fn run_ui(shared: Arc<Mutex<SharedState>>) -> Result<()> {
 
             // spectrogram square size (bigger)
             let square = 0.55 * f32::min(w, h);
-            let spec_x = center_x - square * 0.5;
+            let spec_x = center_x + w * 0.2 - square * 0.5;
             // move spectrogram up a bit
             let spec_y = center_y + h * 0.02 - square * 0.5;
             // ensure uv texture exists and encode log-y, linear-x mapping in RG
