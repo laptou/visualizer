@@ -1144,6 +1144,10 @@ impl DrawContext {
             match step {
                 Step::SetBlend(_b) => { /* handled per draw */ }
                 Step::PushClip { vertices, indices } => {
+                    // skip if nothing to draw to avoid creating zero-sized buffers
+                    if vertices.is_empty() || indices.is_empty() {
+                        continue;
+                    }
                     let (vbuf, ibuf, icount) = self.upload(vertices, indices);
                     rpass.set_pipeline(&self.pipeline_stencil_write);
                     rpass.set_stencil_reference(1);
@@ -1154,6 +1158,10 @@ impl DrawContext {
                     rpass.draw_indexed(0..icount, 0, 0..1);
                 }
                 Step::PopClip { vertices, indices } => {
+                    // skip if nothing to draw to avoid creating zero-sized buffers
+                    if vertices.is_empty() || indices.is_empty() {
+                        continue;
+                    }
                     let (vbuf, ibuf, icount) = self.upload(vertices, indices);
                     rpass.set_pipeline(&self.pipeline_stencil_write);
                     rpass.set_stencil_reference(0);
@@ -1169,6 +1177,10 @@ impl DrawContext {
                     blend,
                     clipped,
                 } => {
+                    // skip if nothing to draw to avoid creating zero-sized buffers
+                    if vertices.is_empty() || indices.is_empty() {
+                        continue;
+                    }
                     let (vbuf, ibuf, icount) = self.upload(vertices, indices);
                     let pipe = match (blend, clipped) {
                         (BlendMode::Alpha, false) => &self.pipeline_alpha,
@@ -1240,6 +1252,10 @@ impl DrawContext {
                     tex_id,
                     clipped,
                 } => {
+                    // skip if nothing to draw to avoid creating zero-sized buffers
+                    if vertices.is_empty() || indices.is_empty() {
+                        continue;
+                    }
                     if let Some(tex) = self.textures.get(tex_id) {
                         let (vbuf, ibuf, icount) = self.upload_tex(vertices, indices);
                         let pipe = if clipped {
@@ -1265,6 +1281,10 @@ impl DrawContext {
                     uv_tex_id,
                     clipped,
                 } => {
+                    // skip if nothing to draw to avoid creating zero-sized buffers
+                    if vertices.is_empty() || indices.is_empty() {
+                        continue;
+                    }
                     if let (Some(src), Some(uv)) =
                         (self.textures.get(src_tex_id), self.textures.get(uv_tex_id))
                     {
