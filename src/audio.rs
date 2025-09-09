@@ -148,7 +148,7 @@ impl AudioProcessor {
                 if !self.beat_history.is_empty() {
                     let (avg, variance) = mean_and_variance2(self.beat_history.as_slices().0);
                     let thrs = [
-                        (-15.0 * variance[0] + 1.55) * avg[0],
+                        (-10.0 * variance[0] + 1.55) * avg[0],
                         (-15.0 * variance[1] + 1.55) * avg[1],
                     ];
                     let last = *self.beat_history.back().unwrap_or(&[0.0, 0.0]);
@@ -363,7 +363,15 @@ impl AudioProcessor {
             .map(|(&current, &previous)| f32::max(current - previous, 0.0))
             .sum();
 
-        // compute mean magnitudes in bass and low-mid bands (normalized by window size)
+        // compute mean magnitudes in bass and low-mid bands, normalized to 0..1 per frame
+        // blog assumes fft magnitudes are normalized; approximate by dividing by frame max
+        let mut max_mag = 0.0f32;
+        for &m in magnitudes.iter() {
+            if m > max_mag {
+                max_mag = m;
+            }
+        }
+        let denom = f32::max(max_mag, 1e-6);
         let mut band_vals = [0.0f32; 2];
         for (band_idx, (start, end)) in self.band_limits.iter().enumerate() {
             let s = min(*start, magnitudes.len());
@@ -372,10 +380,12 @@ impl AudioProcessor {
                 let mut acc = 0.0f32;
                 let mut cnt = 0usize;
                 for k in s..e {
-                    acc += magnitudes[k] / BUFFER_SIZE as f32;
+                    let v01 = magnitudes[k] / denom;
+                    acc += v01;
                     cnt += 1;
                 }
-                band_vals[band_idx] = if cnt > 0 { acc / cnt as f32 } else { 0.0 };
+                let avg = if cnt > 0 { acc / cnt as f32 } else { 0.0 };
+                band_vals[band_idx] = f32::clamp(avg, 0.0, 1.0);
             }
         }
 
