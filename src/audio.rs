@@ -42,6 +42,9 @@ const HIGH_ALLOW_FC: f32 = 4000.0; // corner frequency to allow highs (hi-hats/s
 const HIGH_ALLOW_GAIN: f32 = 0.3; // highs are allowed but with reduced weight vs lows
 const FREQ_EPS: f32 = 1e-3; // avoid div-by-zero in weighting math
 
+// normalization for band energies
+const MAG_REF_EMA_ALPHA: f32 = 0.1; // ema for stable magnitude reference
+
 // spectrogram display cap (we only visualize up to this frequency)
 const SPECTRO_MAX_HZ: f32 = 8000.0;
 
@@ -78,17 +81,21 @@ struct AudioProcessor {
     beat_history: VecDeque<[f32; 2]>, // [bass, lowmid]
     beat_history_max: usize,
     band_limits: [(usize, usize); 2], // [(bass_start, bass_end), (lowmid_start, lowmid_end)] exclusive end
+    // rolling reference for magnitude normalization
+    magnitude_ref_ema: f32,
 }
 
 impl AudioProcessor {
     fn new(sample_rate: u32, hop_size: usize, shared: Arc<Mutex<SharedState>>) -> Self {
         // compute band indices from sample rate and fft size
         let bin_hz = sample_rate as f32 / BUFFER_SIZE as f32;
-        let to_idx = |hz: f32| -> usize { f32::floor(hz / bin_hz) as usize };
-        let bass_start = to_idx(BASS_MIN_HZ);
-        let bass_end = to_idx(BASS_MAX_HZ);
-        let lowmid_start = to_idx(LOWMID_MIN_HZ);
-        let lowmid_end = to_idx(LOWMID_MAX_HZ);
+        // use ceil for start and floor+1 for end to include upper bin and keep end exclusive
+        let to_start = |hz: f32| -> usize { f32::max(f32::ceil(hz / bin_hz), 0.0) as usize };
+        let to_end_excl = |hz: f32| -> usize { (f32::max(f32::floor(hz / bin_hz), 0.0) as usize).saturating_add(1) };
+        let bass_start = to_start(BASS_MIN_HZ);
+        let bass_end = to_end_excl(BASS_MAX_HZ);
+        let lowmid_start = to_start(LOWMID_MIN_HZ);
+        let lowmid_end = to_end_excl(LOWMID_MAX_HZ);
         // number of analysis hops per second ~ sample_rate / hop_size
         let hist_max = std::cmp::max((sample_rate as usize) / std::cmp::max(hop_size, 1), 1);
         Self {
@@ -109,6 +116,7 @@ impl AudioProcessor {
             beat_history: VecDeque::with_capacity(hist_max + 1),
             beat_history_max: hist_max,
             band_limits: [(bass_start, bass_end), (lowmid_start, lowmid_end)],
+            magnitude_ref_ema: 1e-3,
         }
     }
 
@@ -146,9 +154,11 @@ impl AudioProcessor {
                 // also publish most recent beat debug metrics if available
                 // use last history avg/var by recomputing from beat_history
                 if !self.beat_history.is_empty() {
-                    let (avg, variance) = mean_and_variance2(self.beat_history.as_slices().0);
+                    // compute stats over full deque to avoid ignoring wrapped portion
+                    let data: Vec<[f32; 2]> = self.beat_history.iter().copied().collect();
+                    let (avg, variance) = mean_and_variance2(&data);
                     let thrs = [
-                        (-10.0 * variance[0] + 1.55) * avg[0],
+                        (-15.0 * variance[0] + 1.55) * avg[0],
                         (-15.0 * variance[1] + 1.55) * avg[1],
                     ];
                     let last = *self.beat_history.back().unwrap_or(&[0.0, 0.0]);
@@ -266,7 +276,8 @@ impl AudioProcessor {
         let mut is_bass = false;
         let mut _is_lowmid = false;
         if !self.beat_history.is_empty() {
-            let (avg, variance) = mean_and_variance2(self.beat_history.as_slices().0);
+            let data: Vec<[f32; 2]> = self.beat_history.iter().copied().collect();
+            let (avg, variance) = mean_and_variance2(&data);
             let thr = [
                 (-15.0 * variance[0] + 1.55) * avg[0],
                 (-15.0 * variance[1] + 1.55) * avg[1],
@@ -287,7 +298,7 @@ impl AudioProcessor {
                 .last_kick_at
                 .map(|t| Instant::now().duration_since(t).as_secs_f32())
                 .unwrap_or(10.0);
-            let refractory = if self.current_bpm > 0.0 { 15.0 / self.current_bpm } else { 0.1 };
+            let refractory = if self.current_bpm > 0.0 { 30.0 / self.current_bpm } else { 0.1 };
             if time_since_last_kick > refractory {
                 self.last_kick_at = Some(Instant::now());
                 debug!("kick marked by energy threshold");
@@ -363,15 +374,22 @@ impl AudioProcessor {
             .map(|(&current, &previous)| f32::max(current - previous, 0.0))
             .sum();
 
-        // compute mean magnitudes in bass and low-mid bands, normalized to 0..1 per frame
-        // blog assumes fft magnitudes are normalized; approximate by dividing by frame max
+        // compute mean magnitudes in bass and low-mid bands
+        // use a rolling reference (ema of per-frame max) to stabilize normalization across frames
         let mut max_mag = 0.0f32;
         for &m in magnitudes.iter() {
             if m > max_mag {
                 max_mag = m;
             }
         }
-        let denom = f32::max(max_mag, 1e-6);
+        // update magnitude reference ema
+        if self.magnitude_ref_ema > 0.0 {
+            self.magnitude_ref_ema = MAG_REF_EMA_ALPHA * max_mag
+                + (1.0 - MAG_REF_EMA_ALPHA) * self.magnitude_ref_ema;
+        } else {
+            self.magnitude_ref_ema = max_mag;
+        }
+        let denom = f32::max(self.magnitude_ref_ema, 1e-6);
         let mut band_vals = [0.0f32; 2];
         for (band_idx, (start, end)) in self.band_limits.iter().enumerate() {
             let s = min(*start, magnitudes.len());
